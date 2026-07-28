@@ -1,0 +1,78 @@
+use std::collections::HashMap;
+use std::env;
+
+use crate::error::Result;
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub listen_addr: String,
+    pub gemini_base_url: String,
+    pub gemini_cookies: HashMap<String, String>,
+    pub gemini_api_key: Option<String>,
+    pub auth_token: Option<String>,
+    pub default_model: String,
+    pub max_retries: u32,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Self> {
+        dotenvy::dotenv().ok();
+
+        let listen_addr = env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".into());
+
+        let gemini_base_url = env::var("GEMINI_BASE_URL")
+            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com".into());
+
+        let gemini_api_key = env::var("GEMINI_API_KEY").ok();
+
+        let gemini_cookies = Self::parse_cookies(
+            &env::var("GEMINI_COOKIES").unwrap_or_default(),
+        );
+
+        let auth_token = env::var("AUTH_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        let default_model = env::var("DEFAULT_MODEL")
+            .unwrap_or_else(|_| "gemini-2.5-flash".into());
+
+        let max_retries = env::var("MAX_RETRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+
+        Ok(Config {
+            listen_addr,
+            gemini_base_url,
+            gemini_cookies,
+            gemini_api_key,
+            auth_token,
+            default_model,
+            max_retries,
+        })
+    }
+
+    pub fn has_cookie_auth(&self) -> bool {
+        self.gemini_cookies.contains_key("__Secure-1PSID")
+            || self.gemini_cookies.contains_key("SID")
+    }
+
+    pub fn has_api_key(&self) -> bool {
+        self.gemini_api_key.is_some()
+    }
+
+    fn parse_cookies(cookie_str: &str) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for part in cookie_str.split(';') {
+            let part = part.trim();
+            if let Some((key, value)) = part.split_once('=') {
+                let key = key.trim().to_string();
+                let value = value.trim().to_string();
+                if !key.is_empty() {
+                    map.insert(key, value);
+                }
+            }
+        }
+        map
+    }
+}
