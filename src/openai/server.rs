@@ -192,11 +192,9 @@ fn build_responses_sse_response(
     model: &str,
     req: &CreateResponse,
 ) -> Response {
-    use crate::openai::responses::ResponseStreamEvent;
-
     let stream = response.bytes_stream();
     let model = model.to_string();
-    let req = req.clone();
+    let _req = req.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(64);
 
     tokio::spawn(async move {
