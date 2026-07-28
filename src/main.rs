@@ -67,10 +67,15 @@ async fn main() -> anyhow::Result<()> {
 
     let auth = gemini_proxy::gemini::auth::GeminiAuth::from_config(&config)?;
     let gemini_client = gemini_proxy::gemini::client::GeminiClient::new(auth, config.gemini_base_url.clone(), config.gemini_models.clone())?;
-    let app = gemini_proxy::openai::server::create_router(gemini_proxy::openai::server::AppState {
+    let openai_app = gemini_proxy::openai::server::create_router(gemini_proxy::openai::server::AppState {
+        gemini_client: gemini_client.clone(),
+        config: config.clone(),
+    });
+    let anthropic_app = gemini_proxy::anthropic::server::create_anthropic_router(gemini_proxy::anthropic::server::AnthropicAppState {
         gemini_client,
         config: config.clone(),
     });
+    let app = openai_app.merge(anthropic_app);
 
     let cors = if config.cors_origins.iter().any(|o| o == "*") {
         CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any)
