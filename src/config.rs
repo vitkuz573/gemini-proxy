@@ -49,9 +49,10 @@ impl Config {
                 vec![
                     "gemini-2.5-pro".to_string(),
                     "gemini-2.5-flash".to_string(),
-                    "gemini-2.5-flash-preview".to_string(),
-                    "gemini-2.0-flash".to_string(),
-                    "gemini-2.0-flash-lite".to_string(),
+                    "gemini-2.5-flash-lite".to_string(),
+                    "gemini-3.5-flash".to_string(),
+                    "gemini-3.5-flash-lite".to_string(),
+                    "gemini-3.6-flash".to_string(),
                 ]
             });
 
