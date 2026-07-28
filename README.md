@@ -1,4 +1,4 @@
-# gemini2openai
+# gemini-proxy
 
 OpenAI-compatible API proxy for Google Gemini with cookie-based authentication.
 
@@ -26,8 +26,8 @@ Drop-in replacement for OpenAI API -- use any OpenAI-compatible client (LiteLLM,
 
 ```bash
 # Clone
-git clone https://github.com/vitkuz573/gemini2openai.git
-cd gemini2openai
+git clone https://github.com/vitkuz573/gemini-proxy.git
+cd gemini-proxy
 
 # Configure
 cp .env.example .env  # or create manually
@@ -35,14 +35,14 @@ cp .env.example .env  # or create manually
 
 # Build and run
 cargo build --release
-./target/release/gemini2openai
+./target/release/gemini-proxy
 ```
 
 ### With Docker
 
 ```bash
-docker build -t gemini2openai .
-docker run -p 3000:3000 --env-file .env gemini2openai
+docker build -t gemini-proxy .
+docker run -p 3000:3000 --env-file .env gemini-proxy
 ```
 
 ## Configuration

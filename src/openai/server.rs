@@ -42,7 +42,7 @@ pub fn create_router(state: AppState) -> Router {
 
 async fn root_info() -> Json<Value> {
     Json(json!({
-        "name": "gemini2openai",
+        "name": "gemini-proxy",
         "version": "0.1.0",
         "description": "Gemini-to-OpenAI compatible API proxy"
     }))

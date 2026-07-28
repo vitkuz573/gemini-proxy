@@ -5,10 +5,10 @@ use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use gemini2openai::config::Config;
-use gemini2openai::gemini::auth::GeminiAuth;
-use gemini2openai::gemini::client::GeminiClient;
-use gemini2openai::openai::server::{create_router, AppState};
+use gemini_proxy::config::Config;
+use gemini_proxy::gemini::auth::GeminiAuth;
+use gemini_proxy::gemini::client::GeminiClient;
+use gemini_proxy::openai::server::{create_router, AppState};
 
 fn make_config() -> Config {
     Config {
@@ -86,7 +86,7 @@ async fn test_root_returns_info() {
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["name"], "gemini2openai");
+    assert_eq!(json["name"], "gemini-proxy");
     assert_eq!(json["version"], "0.1.0");
 }
 
