@@ -1,24 +1,26 @@
 # gemini-proxy
 
-OpenAI-compatible API proxy for Google Gemini with cookie-based authentication.
+OpenAI and Anthropic-compatible API proxy for Google Gemini with cookie-based authentication.
 
-Drop-in replacement for OpenAI API -- use any OpenAI-compatible client (LiteLLM, Open WebUI, Continue, etc.) with Google Gemini models.
+Drop-in replacement for both OpenAI and Anthropic APIs -- use any compatible client (LiteLLM, Open WebUI, Continue, Claude SDK, etc.) with Google Gemini models.
 
 ## Features
 
 - **OpenAI-compatible API** -- drop-in replacement for `/v1/chat/completions`, `/v1/models`
+- **Anthropic Messages API** -- drop-in replacement for `/v1/messages`
 - **Responses API** -- full support for `POST /v1/responses` endpoint
 - **Dual auth modes** -- Google API key or browser cookie-based authentication
 - **Streaming support** -- full SSE streaming with `stream: true`
 - **stream_options.include_usage** -- streaming usage chunks support
-- **Tool/function calling** -- OpenAI tools format converted to Gemini function declarations
+- **Tool/function calling** -- OpenAI and Anthropic tools format converted to Gemini function declarations
 - **Vision support** -- base64 and URL image inputs via `image_url` content parts
 - **Web frontend mode** -- uses Google's internal web API for cookie auth (no API key needed)
 - **Reasoning/thinking model support** -- automatic mode detection for Pro, Thinking, and Flash models with `thinking_config` budget for Pro models
 - **New OpenAI fields** -- `system_fingerprint`, `service_tier`, `parallel_tool_calls`, `reasoning_effort`, `store`, `metadata`
-- **CORS enabled** -- all origins allowed
+- **CORS enabled** -- configurable origins
 - **Docker ready** -- multi-stage Dockerfile included
 - **Bearer token auth** -- optional `AUTH_TOKEN` to protect your proxy endpoint
+- **Rate limiting** -- configurable per-IP rate limiting
 
 ## Quick Start
 
@@ -58,6 +60,9 @@ Create a `.env` file (or export as environment variables):
 | `DEFAULT_MODEL` | `gemini-2.5-flash` | Default model when none specified in request |
 | `MAX_RETRIES` | `2` | Max retry attempts for upstream requests |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Gemini API base URL |
+| `GEMINI_MODELS` | `gemini-2.5-pro,gemini-2.5-flash,...` | Comma-separated list of available models |
+| `RATE_LIMIT` | `60` | Max requests per minute per IP |
+| `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins |
 
 ### Authentication
 
@@ -78,6 +83,7 @@ GEMINI_COOKIES=__Secure-1PSID=...; __Secure-1PAPISID=...; ...
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/v1/chat/completions` | Chat completion (OpenAI-compatible) |
+| `POST` | `/v1/messages` | Messages API (Anthropic-compatible) |
 | `POST` | `/v1/responses` | Responses API (OpenAI-compatible) |
 | `GET` | `/v1/models` | List available models |
 | `GET` | `/v1/models/{model}` | Get model details |
@@ -155,6 +161,35 @@ curl http://localhost:3000/v1/responses \
   -d '{
     "model": "gemini-2.5-flash",
     "input": "What is the capital of France?"
+  }'
+```
+
+### Anthropic Messages API
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(
+    base_url="http://localhost:3000",
+    api_key="not-needed"  # or your AUTH_TOKEN
+)
+
+message = client.messages.create(
+    model="gemini-2.5-flash",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+print(message.content[0].text)
+```
+
+```bash
+# Anthropic Messages API with curl
+curl http://localhost:3000/v1/messages \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
 
