@@ -18,6 +18,7 @@ use crate::gemini::types::{
 };
 use crate::openai::converter::{gemini_to_openai_response, openai_to_gemini_request};
 use crate::openai::types::{ChatCompletionRequest, Model, ModelsResponse};
+use crate::openai::responses::CreateResponse;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,6 +29,7 @@ pub struct AppState {
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/responses", post(create_response))
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model}", get(get_model))
         .route("/health", get(health_check))
@@ -123,11 +125,15 @@ async fn chat_completions(
     let gemini_request = openai_to_gemini_request(&request)?;
 
     if request.stream.unwrap_or(false) {
+        let include_usage = request
+            .stream_options
+            .as_ref()
+            .map_or(false, |o| o.include_usage);
         let response = state
             .gemini_client
             .stream_content(&model, &gemini_request)
             .await?;
-        Ok(build_sse_response(response, &model))
+        Ok(build_sse_response(response, &model, include_usage))
     } else {
         let gemini_response = state
             .gemini_client
@@ -138,7 +144,248 @@ async fn chat_completions(
     }
 }
 
-fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
+async fn create_response(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumJson(request): AxumJson<CreateResponse>,
+) -> std::result::Result<Response, ProxyError> {
+    if let Some(ref auth_token) = state.config.auth_token {
+        let token = extract_bearer_token(&headers).ok_or_else(|| {
+            ProxyError::Auth("Missing or invalid Authorization header".into())
+        })?;
+        if token != *auth_token {
+            return Err(ProxyError::Auth("Invalid authentication token".into()));
+        }
+    }
+
+    let model = if request.model.is_empty() {
+        state.config.default_model.clone()
+    } else {
+        request.model.clone()
+    };
+
+    let gemini_request =
+        crate::openai::responses_converter::openai_response_to_gemini_request(&request)?;
+
+    if request.stream.unwrap_or(false) {
+        let response = state
+            .gemini_client
+            .stream_content(&model, &gemini_request)
+            .await?;
+        Ok(build_responses_sse_response(response, &model, &request))
+    } else {
+        let gemini_response = state
+            .gemini_client
+            .generate_content(&model, &gemini_request)
+            .await?;
+        let response = crate::openai::responses_converter::gemini_to_openai_response(
+            gemini_response,
+            &model,
+            &request,
+        )?;
+        Ok(Json(serde_json::to_value(response)?).into_response())
+    }
+}
+
+fn build_responses_sse_response(
+    response: reqwest::Response,
+    model: &str,
+    req: &CreateResponse,
+) -> Response {
+    use crate::openai::responses::ResponseStreamEvent;
+
+    let stream = response.bytes_stream();
+    let model = model.to_string();
+    let req = req.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(64);
+
+    tokio::spawn(async move {
+        let mut buffer = String::new();
+        let mut stream = std::pin::pin!(stream);
+        let mut accumulated_text = String::new();
+        let response_id = crate::openai::responses_converter::generate_response_id();
+        let msg_id = crate::openai::responses_converter::generate_msg_id();
+        let created_at = chrono::UTC::now().timestamp();
+        let mut seq = 0u32;
+        let mut sent_created = false;
+
+        while let Some(chunk_result) = stream.next().await {
+            let bytes = match chunk_result {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("stream read error: {e}");
+                    break;
+                }
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    continue;
+                }
+
+                let data = if let Some(d) = line.strip_prefix("data: ") {
+                    if d == "[DONE]" {
+                        break;
+                    }
+                    d.to_string()
+                } else if line.starts_with('[') {
+                    line.clone()
+                } else {
+                    continue;
+                };
+
+                let gemini_chunk =
+                    match serde_json::from_str::<GenerateContentResponse>(&data) {
+                        Ok(c) => Some(c),
+                        Err(_) => {
+                            serde_json::from_str::<Value>(&data)
+                                .ok()
+                                .and_then(|parsed| {
+                                    crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
+                                        .map(|text| GenerateContentResponse {
+                                            candidates: vec![Candidate {
+                                                content: Some(ResponseContent {
+                                                    role: "model".to_string(),
+                                                    parts: vec![ResponsePart::Text(
+                                                        TextResponsePart { text },
+                                                    )],
+                                                }),
+                                                finish_reason: None,
+                                                index: 0,
+                                                safety_ratings: None,
+                                            }],
+                                            usage_metadata: None,
+                                            model_version: None,
+                                            response_id: None,
+                                        })
+                                })
+                        }
+                    };
+
+                if let Some(chunk) = gemini_chunk {
+                    let candidate = match chunk.candidates.first() {
+                        Some(c) => c,
+                        None => continue,
+                    };
+
+                    let mut chunk_text = String::new();
+                    if let Some(ref content) = candidate.content {
+                        for part in &content.parts {
+                            if let ResponsePart::Text(tp) = part {
+                                chunk_text.push_str(&tp.text);
+                            }
+                        }
+                    }
+
+                    if !sent_created && !chunk_text.is_empty() {
+                        sent_created = true;
+                        let created_event = json!({
+                            "type": "response.created",
+                            "response": {
+                                "id": response_id,
+                                "object": "response",
+                                "created_at": created_at,
+                                "status": "in_progress",
+                                "model": model,
+                                "output": [],
+                                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                            }
+                        });
+                        if let Ok(s) = serde_json::to_string(&created_event) {
+                            let _ = tx.send(Ok(format!("event: response.created\ndata: {s}\n\n"))).await;
+                        }
+                    }
+
+                    if !chunk_text.is_empty() && chunk_text.len() > accumulated_text.len() {
+                        let delta: String = chunk_text
+                            .chars()
+                            .skip(accumulated_text.chars().count())
+                            .collect();
+                        accumulated_text = chunk_text;
+                        seq += 1;
+
+                        let delta_event = json!({
+                            "type": "response.output_text.delta",
+                            "item_id": msg_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": delta,
+                            "sequence_number": seq
+                        });
+                        if let Ok(s) = serde_json::to_string(&delta_event) {
+                            let _ = tx.send(Ok(format!("event: response.output_text.delta\ndata: {s}\n\n"))).await;
+                        }
+                    }
+
+                    if let Some(ref reason) = candidate.finish_reason {
+                        seq += 1;
+                        let text_done = json!({
+                            "type": "response.output_text.done",
+                            "item_id": msg_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "text": accumulated_text
+                        });
+                        if let Ok(s) = serde_json::to_string(&text_done) {
+                            let _ = tx.send(Ok(format!("event: response.output_text.done\ndata: {s}\n\n"))).await;
+                        }
+
+                        let status = match reason.as_str() {
+                            "STOP" => "completed",
+                            "MAX_TOKENS" => "incomplete",
+                            _ => "failed",
+                        };
+                        let completed_event = json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": response_id,
+                                "object": "response",
+                                "created_at": created_at,
+                                "completed_at": chrono::UTC::now().timestamp(),
+                                "status": status,
+                                "model": model,
+                                "output": [{
+                                    "type": "message",
+                                    "id": msg_id,
+                                    "status": "completed",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": accumulated_text, "annotations": []}]
+                                }],
+                                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                            }
+                        });
+                        if let Ok(s) = serde_json::to_string(&completed_event) {
+                            let _ = tx.send(Ok(format!("event: response.completed\ndata: {s}\n\n"))).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+    });
+
+    let body_stream = ReceiverStream::new(rx).map(|result| match result {
+        Ok(s) => Ok::<_, Infallible>(s.into_bytes()),
+        Err(e) => Err(e),
+    });
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", HeaderValue::from_static("text/event-stream"));
+    headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
+    headers.insert("Connection", HeaderValue::from_static("keep-alive"));
+    headers.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
+
+    let response = axum::body::Body::from_stream(body_stream);
+    (headers, response).into_response()
+}
+
+fn build_sse_response(response: reqwest::Response, model: &str, include_usage: bool) -> Response {
     let stream = response.bytes_stream();
     let model = model.to_string();
     let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(64);
@@ -150,6 +397,7 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
         let id = crate::openai::converter::generate_id();
         let created = chrono::UTC::now().timestamp();
         let mut sent_initial = false;
+        let mut sent_finish = false;
 
         while let Some(chunk_result) = stream.next().await {
             let bytes = match chunk_result {
@@ -178,13 +426,13 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                     let gemini_chunk = match serde_json::from_str::<GenerateContentResponse>(data) {
                         Ok(c) => Some(c),
                         Err(_) => {
-                            if let Ok(parsed) = serde_json::from_str::<Value>(data) {
-                                if let Some(text) =
+                            serde_json::from_str::<Value>(data)
+                                .ok()
+                                .and_then(|parsed| {
                                     crate::gemini::web_frontend::extract_text_from_parsed_response(
                                         &parsed,
                                     )
-                                {
-                                    Some(GenerateContentResponse {
+                                    .map(|text| GenerateContentResponse {
                                         candidates: vec![Candidate {
                                             content: Some(ResponseContent {
                                                 role: "model".to_string(),
@@ -200,12 +448,7 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                                         model_version: None,
                                         response_id: None,
                                     })
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
+                                })
                         }
                     };
 
@@ -215,7 +458,6 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                             None => continue,
                         };
 
-                        // Extract full text from this chunk
                         let mut chunk_text = String::new();
                         if let Some(ref content) = candidate.content {
                             for part in &content.parts {
@@ -229,7 +471,6 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                             crate::openai::converter::gemini_finish_reason(Some(r.clone()))
                         });
 
-                        // Send initial chunk with role on first content
                         if !sent_initial && !chunk_text.is_empty() {
                             sent_initial = true;
                             let initial = json!({
@@ -248,13 +489,11 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                             }
                         }
 
-                        // Compute delta from accumulated text
                         if !chunk_text.is_empty() && chunk_text.len() > accumulated_text.len() {
-                            let delta = if chunk_text.starts_with(&accumulated_text) {
-                                chunk_text[accumulated_text.len()..].to_string()
-                            } else {
-                                chunk_text[accumulated_text.len()..].to_string()
-                            };
+                            let delta: String = chunk_text
+                                .chars()
+                                .skip(accumulated_text.chars().count())
+                                .collect();
                             accumulated_text = chunk_text;
                             let chunk_json = json!({
                                 "id": id,
@@ -272,8 +511,8 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                             }
                         }
 
-                        // Send finish chunk if this candidate has a finish_reason
                         if finish_reason.is_some() {
+                            sent_finish = true;
                             let finish_chunk = json!({
                                 "id": id,
                                 "object": "chat.completion.chunk",
@@ -291,12 +530,9 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                         }
                     }
                 } else if line.starts_with('[') {
-                    // Web frontend ?alt=sse format: raw JSON arrays per line
                     if let Ok(parsed) = serde_json::from_str::<Value>(&line) {
                         if let Some(text) =
-                            crate::gemini::web_frontend::extract_text_from_parsed_response(
-                                &parsed,
-                            )
+                            crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
                         {
                             let gemini_chunk = GenerateContentResponse {
                                 candidates: vec![Candidate {
@@ -348,7 +584,10 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
                             }
 
                             if !chunk_text.is_empty() && chunk_text.len() > accumulated_text.len() {
-                                let delta = chunk_text[accumulated_text.len()..].to_string();
+                                let delta: String = chunk_text
+                                    .chars()
+                                    .skip(accumulated_text.chars().count())
+                                    .collect();
                                 accumulated_text = chunk_text;
                                 let chunk_json = json!({
                                     "id": id,
@@ -371,20 +610,39 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
             }
         }
 
-        // Send final chunk if we didn't get a finish_reason from Gemini
-        let final_chunk = json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {},
-                "finish_reason": "stop"
-            }]
-        });
-        if let Ok(s) = serde_json::to_string(&final_chunk) {
-            let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+        if !sent_finish {
+            let final_chunk = json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop"
+                }]
+            });
+            if let Ok(s) = serde_json::to_string(&final_chunk) {
+                let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+            }
+        }
+
+        if include_usage {
+            let usage_chunk = json!({
+                "id": id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0
+                }
+            });
+            if let Ok(s) = serde_json::to_string(&usage_chunk) {
+                let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+            }
         }
 
         let _ = tx
@@ -401,6 +659,7 @@ fn build_sse_response(response: reqwest::Response, model: &str) -> Response {
     headers.insert("Content-Type", HeaderValue::from_static("text/event-stream"));
     headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
     headers.insert("Connection", HeaderValue::from_static("keep-alive"));
+    headers.insert("X-Accel-Buffering", HeaderValue::from_static("no"));
 
     let response = axum::body::Body::from_stream(body_stream);
     (headers, response).into_response()

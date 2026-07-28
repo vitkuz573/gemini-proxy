@@ -118,7 +118,7 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
         temperature: req.temperature,
         top_p: req.top_p,
         top_k: None,
-        max_output_tokens: req.max_tokens.or(req.max_completion_tokens),
+        max_output_tokens: req.max_completion_tokens.or(req.max_tokens),
         stop_sequences: req.stop.clone(),
         candidate_count: req.n,
         presence_penalty: req.presence_penalty,
@@ -149,12 +149,42 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
         } else {
             Some(tools_list)
         },
-        tool_config: if has_tool_config && req.tool_choice.is_some() {
-            Some(ToolConfig {
-                function_calling_config: FunctionCallingConfig {
-                    mode: "any".into(),
-                },
-            })
+        tool_config: if has_tool_config {
+            match req.tool_choice.as_ref() {
+                Some(tc) => {
+                    if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()) {
+                        Some(ToolConfig {
+                            function_calling_config: FunctionCallingConfig {
+                                mode: "ANY".into(),
+                                allowed_function_names: Some(vec![name.to_string()]),
+                            },
+                        })
+                    } else {
+                        match tc.as_str() {
+                            Some("auto") => Some(ToolConfig {
+                                function_calling_config: FunctionCallingConfig {
+                                    mode: "AUTO".into(),
+                                    allowed_function_names: None,
+                                },
+                            }),
+                            Some("none") => Some(ToolConfig {
+                                function_calling_config: FunctionCallingConfig {
+                                    mode: "NONE".into(),
+                                    allowed_function_names: None,
+                                },
+                            }),
+                            Some("required") => Some(ToolConfig {
+                                function_calling_config: FunctionCallingConfig {
+                                    mode: "ANY".into(),
+                                    allowed_function_names: None,
+                                },
+                            }),
+                            _ => None,
+                        }
+                    }
+                }
+                None => None,
+            }
         } else {
             None
         },
@@ -287,6 +317,8 @@ pub fn gemini_to_openai_response(
             logprobs: None,
         }],
         usage,
+        system_fingerprint: None,
+        service_tier: None,
     })
 }
 
@@ -347,6 +379,9 @@ pub fn gemini_chunk_to_openai_chunk(
             },
             finish_reason,
         }],
+        system_fingerprint: None,
+        service_tier: None,
+        usage: None,
     })
 }
 
@@ -388,6 +423,11 @@ mod tests {
             seed: None,
             n: None,
             user: None,
+            parallel_tool_calls: None,
+            reasoning_effort: None,
+            service_tier: None,
+            store: None,
+            metadata: None,
         }
     }
 
@@ -458,6 +498,11 @@ mod tests {
             seed: None,
             n: None,
             user: None,
+            parallel_tool_calls: None,
+            reasoning_effort: None,
+            service_tier: None,
+            store: None,
+            metadata: None,
         };
         let gemini_req = openai_to_gemini_request(&req).unwrap();
 
@@ -499,6 +544,11 @@ mod tests {
             seed: None,
             n: None,
             user: None,
+            parallel_tool_calls: None,
+            reasoning_effort: None,
+            service_tier: None,
+            store: None,
+            metadata: None,
         };
         let gemini_req = openai_to_gemini_request(&req).unwrap();
 
@@ -548,6 +598,11 @@ mod tests {
             seed: None,
             n: None,
             user: None,
+            parallel_tool_calls: None,
+            reasoning_effort: None,
+            service_tier: None,
+            store: None,
+            metadata: None,
         };
         let gemini_req = openai_to_gemini_request(&req).unwrap();
 
@@ -586,6 +641,11 @@ mod tests {
             seed: None,
             n: None,
             user: None,
+            parallel_tool_calls: None,
+            reasoning_effort: None,
+            service_tier: None,
+            store: None,
+            metadata: None,
         };
         let gemini_req = openai_to_gemini_request(&req).unwrap();
 
@@ -614,6 +674,7 @@ mod tests {
                 prompt_token_count: 10,
                 candidates_token_count: 5,
                 total_token_count: 15,
+                cached_content_token_count: 0,
             }),
             model_version: None,
             response_id: None,

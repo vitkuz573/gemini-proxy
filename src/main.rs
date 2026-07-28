@@ -1,4 +1,5 @@
 use tracing_subscriber::EnvFilter;
+use tower_http::cors::{CorsLayer, Any};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -20,6 +21,12 @@ async fn main() -> anyhow::Result<()> {
         gemini_client,
         config: config.clone(),
     });
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+    let app = app.layer(cors);
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     axum::serve(listener, app).await?;

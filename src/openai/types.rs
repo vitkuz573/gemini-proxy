@@ -35,6 +35,16 @@ pub struct ChatCompletionRequest {
     pub n: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,7 +116,6 @@ pub struct FunctionDef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamOptions {
-    #[serde(rename = "include_usage")]
     pub include_usage: bool,
 }
 
@@ -127,6 +136,10 @@ pub struct ChatCompletionResponse {
     pub choices: Vec<Choice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +187,12 @@ pub struct ChatCompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<ChunkChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -279,6 +298,11 @@ mod tests {
             seed: None,
             n: None,
             user: None,
+            parallel_tool_calls: None,
+            reasoning_effort: None,
+            service_tier: None,
+            store: None,
+            metadata: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"model\":\"gpt-4\""));
@@ -329,6 +353,8 @@ mod tests {
                 prompt_tokens_details: None,
                 completion_tokens_details: None,
             }),
+            system_fingerprint: None,
+            service_tier: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"object\":\"chat.completion\""));
@@ -384,6 +410,9 @@ mod tests {
                 },
                 finish_reason: None,
             }],
+            system_fingerprint: None,
+            service_tier: None,
+            usage: None,
         };
         let json = serde_json::to_string(&chunk).unwrap();
         assert!(json.contains("\"object\":\"chat.completion.chunk\""));

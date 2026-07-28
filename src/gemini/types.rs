@@ -133,6 +133,8 @@ pub struct ToolConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCallingConfig {
     pub mode: String,
+    #[serde(rename = "allowedFunctionNames", skip_serializing_if = "Option::is_none")]
+    pub allowed_function_names: Option<Vec<String>>,
 }
 
 // ── Response types ─────────────────────────────────────────────
@@ -169,12 +171,13 @@ pub struct ResponseContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResponsePart {
-    Text(TextResponsePart),
-    Thought(ThoughtPart),
     FunctionCall(FunctionCallPart),
+    Thought(ThoughtPart),
+    Text(TextResponsePart),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TextResponsePart {
     pub text: String,
 }
@@ -199,6 +202,8 @@ pub struct UsageMetadata {
     pub candidates_token_count: u32,
     #[serde(rename = "totalTokenCount", default)]
     pub total_token_count: u32,
+    #[serde(rename = "cachedContentTokenCount", default)]
+    pub cached_content_token_count: u32,
 }
 
 // ── Model list ─────────────────────────────────────────────────
