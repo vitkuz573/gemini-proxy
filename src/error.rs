@@ -35,7 +35,10 @@ pub enum ProxyError {
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            ProxyError::GeminiApi(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            ProxyError::GeminiApi(msg) => {
+                let sanitized = if msg.len() > 200 { &msg[..200] } else { msg };
+                (StatusCode::BAD_GATEWAY, format!("Upstream error: {sanitized}"))
+            }
             ProxyError::NoCandidates => (StatusCode::BAD_GATEWAY, "Gemini returned no candidates".into()),
             ProxyError::Config(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             ProxyError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),

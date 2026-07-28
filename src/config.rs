@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 
-use crate::error::Result;
+use crate::error::{ProxyError, Result};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -13,6 +13,8 @@ pub struct Config {
     pub default_model: String,
     pub max_retries: u32,
     pub gemini_models: Vec<String>,
+    pub rate_limit: u64,
+    pub cors_origins: Vec<String>,
 }
 
 impl Config {
@@ -56,6 +58,17 @@ impl Config {
                 ]
             });
 
+        let rate_limit = env::var("RATE_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+
+        let cors_origins = env::var("CORS_ORIGINS")
+            .unwrap_or_else(|_| "*".into())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
+
         Ok(Config {
             listen_addr,
             gemini_base_url,
@@ -65,6 +78,8 @@ impl Config {
             default_model,
             max_retries,
             gemini_models,
+            rate_limit,
+            cors_origins,
         })
     }
 
@@ -75,6 +90,23 @@ impl Config {
 
     pub fn has_api_key(&self) -> bool {
         self.gemini_api_key.is_some()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.gemini_api_key.is_none() && self.gemini_cookies.is_empty() {
+            return Err(ProxyError::Config(
+                "Either GEMINI_API_KEY or GEMINI_COOKIES must be set".into(),
+            ));
+        }
+        if !self.gemini_cookies.is_empty() && self.gemini_api_key.is_none() {
+            let required = ["__Secure-1PSID", "SID"];
+            for key in &required {
+                if !self.gemini_cookies.contains_key(*key) {
+                    tracing::warn!("Missing recommended cookie: {key} — auth may fail");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn parse_cookies(cookie_str: &str) -> HashMap<String, String> {

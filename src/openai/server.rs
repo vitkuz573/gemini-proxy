@@ -8,6 +8,7 @@ use axum::{Json as AxumJson, Router};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::ReceiverStream;
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::error;
 
 use crate::config::Config;
@@ -17,7 +18,7 @@ use crate::gemini::types::{
     Candidate, GenerateContentResponse, ResponseContent, ResponsePart, TextResponsePart,
 };
 use crate::openai::converter::{gemini_to_openai_response, openai_to_gemini_request};
-use crate::openai::types::{ChatCompletionRequest, Model, ModelsResponse};
+use crate::openai::types::{ChatCompletionRequest, Model, ModelsResponse, Message as ChatMessage};
 use crate::openai::responses::CreateResponse;
 
 #[derive(Clone)]
@@ -29,12 +30,14 @@ pub struct AppState {
 pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/v1/chat/completions", post(chat_completions))
+        .route("/v1/completions", post(completions))
         .route("/v1/responses", post(create_response))
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model}", get(get_model))
         .route("/health", get(health_check))
         .route("/", get(root_info))
         .with_state(state)
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
 }
 
 async fn root_info() -> Json<Value> {
@@ -665,6 +668,52 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
     let auth = headers.get("authorization")?.to_str().ok()?;
-    let token = auth.strip_prefix("Bearer ")?;
+    let token = auth.strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))
+        .or_else(|| auth.strip_prefix("BEARER "))?;
     Some(token.to_string())
+}
+
+async fn completions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumJson(request): AxumJson<serde_json::Value>,
+) -> std::result::Result<Response, ProxyError> {
+    let prompt = request.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+    let model = request.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let chat_request = ChatCompletionRequest {
+        model,
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: Some(prompt.to_string()),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }],
+        temperature: request.get("temperature").and_then(|v| v.as_f64()),
+        top_p: request.get("top_p").and_then(|v| v.as_f64()),
+        max_tokens: request.get("max_tokens").and_then(|v| v.as_u64()).map(|v| v as u32),
+        max_completion_tokens: None,
+        stream: request.get("stream").and_then(|v| v.as_bool()),
+        stream_options: None,
+        stop: request.get("stop").and_then(|v| {
+            if let Some(s) = v.as_str() { Some(vec![s.to_string()]) }
+            else if let Some(arr) = v.as_array() { Some(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()) }
+            else { None }
+        }),
+        presence_penalty: request.get("presence_penalty").and_then(|v| v.as_f64()),
+        frequency_penalty: request.get("frequency_penalty").and_then(|v| v.as_f64()),
+        tools: None,
+        tool_choice: None,
+        response_format: None,
+        seed: request.get("seed").and_then(|v| v.as_u64()),
+        n: request.get("n").and_then(|v| v.as_u64()).map(|v| v as u32),
+        user: request.get("user").and_then(|v| v.as_str()).map(String::from),
+        parallel_tool_calls: None,
+        reasoning_effort: None,
+        service_tier: None,
+        store: None,
+        metadata: None,
+    };
+    chat_completions(State(state), headers, AxumJson(chat_request)).await
 }

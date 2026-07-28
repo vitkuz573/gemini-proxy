@@ -182,13 +182,7 @@ impl WebFrontendClient {
             params.push(("bl", bl_val.as_str()));
         }
 
-        let query_string: String = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?{query_string}");
+        let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
         let mode = resolve_model_mode(model);
         let inner_req_list = build_inner_req_list(prompt, mode);
@@ -215,7 +209,9 @@ impl WebFrontendClient {
 
         debug!(model, mode, "Sending request to web frontend");
 
-        let mut request = self.client.post(&url).body(body);
+        let mut request = self.client.post(&url)
+            .query(&params)
+            .body(body);
 
         for (key, value) in &headers {
             request = request.header(key.as_str(), value.as_str());
@@ -274,13 +270,7 @@ impl WebFrontendClient {
             params.push(("bl", bl_val.as_str()));
         }
 
-        let query_string: String = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&");
-
-        let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?{query_string}");
+        let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
         let mode = resolve_model_mode(model);
         let inner_req_list = build_inner_req_list(prompt, mode);
@@ -306,7 +296,9 @@ impl WebFrontendClient {
 
         debug!(model, mode, "Sending streaming request to web frontend");
 
-        let mut request = self.client.post(&url).body(body);
+        let mut request = self.client.post(&url)
+            .query(&params)
+            .body(body);
 
         for (key, value) in &headers {
             request = request.header(key.as_str(), value.as_str());
@@ -329,6 +321,14 @@ impl WebFrontendClient {
         }
 
         Ok(response)
+    }
+
+    pub fn session(&self) -> &WebSession {
+        &self.session
+    }
+
+    pub fn set_session(&mut self, session: WebSession) {
+        self.session = session;
     }
 
     pub async fn close(&mut self) {

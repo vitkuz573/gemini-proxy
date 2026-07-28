@@ -1,4 +1,6 @@
+use std::sync::Arc;
 use reqwest::Client;
+use tokio::sync::Mutex;
 use tracing::{debug, error};
 
 use crate::error::{ProxyError, Result};
@@ -14,22 +16,25 @@ pub struct GeminiClient {
     auth: GeminiAuth,
     base_url: String,
     model_names: Vec<String>,
+    web_session: Arc<Mutex<Option<super::web_frontend::WebSession>>>,
 }
 
 impl GeminiClient {
-    pub fn new(auth: GeminiAuth, base_url: String, model_names: Vec<String>) -> Self {
+    pub fn new(auth: GeminiAuth, base_url: String, model_names: Vec<String>) -> Result<Self> {
         let client = Client::builder()
             .pool_max_idle_per_host(20)
             .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(300))
             .build()
-            .expect("failed to build reqwest client");
+            .map_err(|e| ProxyError::Config(format!("Failed to build HTTP client: {e}")))?;
 
-        GeminiClient {
+        Ok(        GeminiClient {
             client,
             auth,
             base_url,
             model_names,
-        }
+            web_session: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub async fn generate_content(
@@ -97,11 +102,21 @@ impl GeminiClient {
         use super::web_frontend::WebFrontendClient;
 
         let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
+        {
+            let session_guard = self.web_session.lock().await;
+            if let Some(ref session) = *session_guard {
+                web_client.set_session(session.clone());
+            }
+        }
 
-        // Extract the prompt text from the request
         let prompt = extract_prompt_text(request);
 
         let response_text = web_client.generate_content(model, &prompt).await?;
+
+        {
+            let mut session_guard = self.web_session.lock().await;
+            *session_guard = Some(web_client.session().clone());
+        }
 
         // Convert web frontend response to standard API response format
         Ok(GenerateContentResponse {
@@ -130,8 +145,18 @@ impl GeminiClient {
         use super::web_frontend::WebFrontendClient;
 
         let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
+        {
+            let session_guard = self.web_session.lock().await;
+            if let Some(ref session) = *session_guard {
+                web_client.set_session(session.clone());
+            }
+        }
         let prompt = extract_prompt_text(request);
         let response = web_client.stream_generate(model, &prompt).await?;
+        {
+            let mut session_guard = self.web_session.lock().await;
+            *session_guard = Some(web_client.session().clone());
+        }
         Ok(response)
     }
 
@@ -189,20 +214,15 @@ impl GeminiClient {
     }
 
     fn build_url(&self, path: &str) -> String {
-        let mut url = format!("{}{path}", self.base_url);
-        if let Some(ref api_key) = self.auth.api_key {
-            if url.contains('?') {
-                url = format!("{url}&key={api_key}");
-            } else {
-                url = format!("{url}?key={api_key}");
-            }
-        }
-        url
+        format!("{}{path}", self.base_url)
     }
 
     fn apply_api_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        // API key auth — key is passed as query param, no extra headers needed
-        req
+        if let Some(ref api_key) = self.auth.api_key {
+            req.header("X-Goog-Api-Key", api_key)
+        } else {
+            req
+        }
     }
 }
 
@@ -240,7 +260,7 @@ mod tests {
             cookies: HashMap::new(),
             api_key: Some("test_api_key".into()),
         };
-        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into(), vec!["gemini-2.5-flash".into()])
+        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into(), vec!["gemini-2.5-flash".into()]).unwrap()
     }
 
     fn make_cookie_client() -> GeminiClient {
@@ -251,17 +271,16 @@ mod tests {
             cookies,
             api_key: None,
         };
-        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into(), vec!["gemini-2.5-flash".into()])
+        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into(), vec!["gemini-2.5-flash".into()]).unwrap()
     }
 
     #[test]
     fn test_build_url_with_api_key() {
         let client = make_api_key_client();
         let url = client.build_url("/v1beta/models");
-        assert!(url.contains("?key=test_api_key"));
         assert_eq!(
             url,
-            "https://generativelanguage.googleapis.com/v1beta/models?key=test_api_key"
+            "https://generativelanguage.googleapis.com/v1beta/models"
         );
     }
 
@@ -269,8 +288,8 @@ mod tests {
     fn test_build_url_with_api_key_existing_query() {
         let client = make_api_key_client();
         let url = client.build_url("/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
-        assert!(url.contains("&key=test_api_key"));
         assert!(url.contains("alt=sse"));
+        assert!(!url.contains("key="));
     }
 
     #[test]

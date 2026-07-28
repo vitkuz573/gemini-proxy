@@ -97,8 +97,12 @@ pub struct GenerationConfig {
     pub frequency_penalty: Option<f64>,
     #[serde(rename = "responseMimeType", skip_serializing_if = "Option::is_none")]
     pub response_mime_type: Option<String>,
+    #[serde(rename = "responseSchema", skip_serializing_if = "Option::is_none")]
+    pub response_schema: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_config: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,7 +181,6 @@ pub enum ResponsePart {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TextResponsePart {
     pub text: String,
 }

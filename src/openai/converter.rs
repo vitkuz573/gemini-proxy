@@ -26,6 +26,12 @@ pub fn gemini_finish_reason(reason: Option<String>) -> String {
 }
 
 pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateContentRequest> {
+    if let Some(n) = req.n {
+        if n == 0 || n > 8 {
+            return Err(ProxyError::BadRequest(format!("n must be between 1 and 8, got {n}")));
+        }
+    }
+
     let mut system_instruction: Option<Parts> = None;
     let mut contents: Vec<Content> = Vec::new();
     let mut function_declarations: Vec<FunctionDeclaration> = Vec::new();
@@ -124,13 +130,37 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
         presence_penalty: req.presence_penalty,
         frequency_penalty: req.frequency_penalty,
         response_mime_type: None,
+        response_schema: None,
         thinking_config: None,
+        seed: req.seed,
     };
 
     if let Some(rf) = &req.response_format {
-        if rf.format_type == "json_object" {
-            generation_config.response_mime_type = Some("application/json".into());
+        match rf.format_type.as_str() {
+            "json_object" => {
+                generation_config.response_mime_type = Some("application/json".into());
+            }
+            "json_schema" => {
+                generation_config.response_mime_type = Some("application/json".into());
+                if let Some(schema) = &rf.json_schema {
+                    generation_config.response_schema = Some(schema.clone());
+                }
+            }
+            _ => {}
         }
+    }
+
+    if let Some(ref effort) = req.reasoning_effort {
+        let budget = match effort.as_str() {
+            "low" => Some(1024),
+            "medium" => Some(8192),
+            "high" => Some(24576),
+            _ => None,
+        };
+        generation_config.thinking_config = Some(ThinkingConfig {
+            include_thoughts: Some(true),
+            thinking_budget: budget,
+        });
     }
 
     let mut tools_list: Vec<GeminiTool> = Vec::new();

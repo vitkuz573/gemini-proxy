@@ -122,7 +122,9 @@ pub fn openai_response_to_gemini_request(req: &CreateResponse) -> Result<Generat
         presence_penalty: None,
         frequency_penalty: None,
         response_mime_type: None,
+        response_schema: None,
         thinking_config: None,
+        seed: None,
     };
 
     // Handle text.format
