@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Auth mode: {}", if config.has_api_key() { "API Key" } else { "Cookie" });
 
     let auth = gemini2openai::gemini::auth::GeminiAuth::from_config(&config)?;
-    let gemini_client = gemini2openai::gemini::client::GeminiClient::new(auth, config.gemini_base_url.clone());
+    let gemini_client = gemini2openai::gemini::client::GeminiClient::new(auth, config.gemini_base_url.clone(), config.gemini_models.clone());
     let app = gemini2openai::openai::server::create_router(gemini2openai::openai::server::AppState {
         gemini_client,
         config: config.clone(),

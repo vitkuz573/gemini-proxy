@@ -73,6 +73,7 @@ mod tests {
             auth_token: None,
             default_model: "gemini-2.5-flash".into(),
             max_retries: 2,
+            gemini_models: vec!["gemini-2.5-flash".into()],
         };
         let result = GeminiAuth::from_config(&config);
         assert!(result.is_err());

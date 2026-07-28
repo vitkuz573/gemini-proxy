@@ -12,6 +12,7 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub default_model: String,
     pub max_retries: u32,
+    pub gemini_models: Vec<String>,
 }
 
 impl Config {
@@ -41,6 +42,19 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
 
+        let gemini_models = env::var("GEMINI_MODELS")
+            .ok()
+            .and_then(|v| serde_json::from_str(&v).ok())
+            .unwrap_or_else(|| {
+                vec![
+                    "gemini-2.5-pro".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                    "gemini-2.5-flash-preview".to_string(),
+                    "gemini-2.0-flash".to_string(),
+                    "gemini-2.0-flash-lite".to_string(),
+                ]
+            });
+
         Ok(Config {
             listen_addr,
             gemini_base_url,
@@ -49,6 +63,7 @@ impl Config {
             auth_token,
             default_model,
             max_retries,
+            gemini_models,
         })
     }
 
