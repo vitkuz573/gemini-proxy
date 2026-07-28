@@ -56,10 +56,14 @@ impl GeminiClient {
 
     pub async fn list_models(&self) -> Result<ModelListResponse> {
         if self.auth.is_cookie_auth() {
-            // Web frontend doesn't have a list models endpoint
-            // Return a default list
             return Ok(ModelListResponse {
-                models: vec![],
+                models: vec![
+                    super::types::ModelInfo { name: "models/gemini-2.5-pro".into(), display_name: "Gemini 2.5 Pro".into(), input_token_limit: 1048576, output_token_limit: 65536 },
+                    super::types::ModelInfo { name: "models/gemini-2.5-flash".into(), display_name: "Gemini 2.5 Flash".into(), input_token_limit: 1048576, output_token_limit: 65536 },
+                    super::types::ModelInfo { name: "models/gemini-2.5-flash-preview".into(), display_name: "Gemini 2.5 Flash Preview".into(), input_token_limit: 1048576, output_token_limit: 65536 },
+                    super::types::ModelInfo { name: "models/gemini-2.0-flash".into(), display_name: "Gemini 2.0 Flash".into(), input_token_limit: 1048576, output_token_limit: 8192 },
+                    super::types::ModelInfo { name: "models/gemini-2.0-flash-lite".into(), display_name: "Gemini 2.0 Flash Lite".into(), input_token_limit: 1048576, output_token_limit: 8192 },
+                ],
             });
         }
 
