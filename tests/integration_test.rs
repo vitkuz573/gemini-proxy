@@ -19,7 +19,6 @@ fn make_config() -> Config {
         auth_token: None,
         default_model: "gemini-2.5-flash".into(),
         max_retries: 2,
-        gemini_models: vec!["gemini-2.5-flash".into()],
         rate_limit: 60,
         cors_origins: vec!["*".to_string()],
     }
@@ -33,7 +32,7 @@ fn make_auth() -> GeminiAuth {
 }
 
 fn make_client() -> GeminiClient {
-    GeminiClient::new(make_auth(), "http://localhost:0".into(), vec!["gemini-2.5-flash".into()]).unwrap()
+    GeminiClient::new(make_auth(), "http://localhost:0".into()).unwrap()
 }
 
 fn app_state() -> AppState {

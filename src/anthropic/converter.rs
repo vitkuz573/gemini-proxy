@@ -39,10 +39,8 @@ pub fn anthropic_to_gemini_request(req: &MessagesRequest) -> Result<GenerateCont
             SystemContent::Blocks(blocks) => {
                 let parts: Vec<Part> = blocks
                     .iter()
-                    .filter_map(|block| match block {
-                        SystemBlock::Text { text } => {
-                            Some(Part::Text(TextPart { text: text.clone() }))
-                        }
+                    .map(|block| match block {
+                        SystemBlock::Text { text } => Part::Text(TextPart { text: text.clone() }),
                     })
                     .collect();
                 if !parts.is_empty() {
@@ -104,14 +102,13 @@ pub fn anthropic_to_gemini_request(req: &MessagesRequest) -> Result<GenerateCont
     };
 
     // Handle thinking/extended thinking
-    if let Some(thinking) = &req.thinking {
-        if thinking.enabled.unwrap_or(false) {
+    if let Some(thinking) = &req.thinking
+        && thinking.enabled.unwrap_or(false) {
             generation_config.thinking_config = Some(GeminiThinkingConfig {
                 include_thoughts: Some(true),
                 thinking_budget: thinking.budget_tokens,
             });
         }
-    }
 
     // Build tools
     let mut tools_list: Vec<GeminiTool> = Vec::new();

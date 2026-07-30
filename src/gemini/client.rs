@@ -15,12 +15,11 @@ pub struct GeminiClient {
     client: Client,
     auth: GeminiAuth,
     base_url: String,
-    model_names: Vec<String>,
     web_session: Arc<Mutex<Option<super::web_frontend::WebSession>>>,
 }
 
 impl GeminiClient {
-    pub fn new(auth: GeminiAuth, base_url: String, model_names: Vec<String>) -> Result<Self> {
+    pub fn new(auth: GeminiAuth, base_url: String) -> Result<Self> {
         let client = Client::builder()
             .pool_max_idle_per_host(20)
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -28,11 +27,10 @@ impl GeminiClient {
             .build()
             .map_err(|e| ProxyError::Config(format!("Failed to build HTTP client: {e}")))?;
 
-        Ok(        GeminiClient {
+        Ok(GeminiClient {
             client,
             auth,
             base_url,
-            model_names,
             web_session: Arc::new(Mutex::new(None)),
         })
     }
@@ -63,15 +61,7 @@ impl GeminiClient {
 
     pub async fn list_models(&self) -> Result<ModelListResponse> {
         if self.auth.is_cookie_auth() {
-            let models = self.model_names.iter().map(|name| {
-                super::types::ModelInfo {
-                    name: format!("models/{name}"),
-                    display_name: name.clone(),
-                    input_token_limit: 1048576,
-                    output_token_limit: 65536,
-                }
-            }).collect();
-            return Ok(ModelListResponse { models });
+            return self.list_models_via_web().await;
         }
 
         let url = self.build_url("/v1beta/models");
@@ -92,6 +82,39 @@ impl GeminiClient {
 
         let response: ModelListResponse = response.json().await?;
         Ok(response)
+    }
+
+    async fn list_models_via_web(&self) -> Result<ModelListResponse> {
+        use super::web_frontend::WebFrontendClient;
+
+        let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
+        {
+            let session_guard = self.web_session.lock().await;
+            if let Some(ref session) = *session_guard {
+                web_client.set_session(session.clone());
+            }
+        }
+
+        let web_models = web_client.list_models().await?;
+
+        {
+            let mut session_guard = self.web_session.lock().await;
+            *session_guard = Some(web_client.session().clone());
+        }
+
+        let models = web_models
+            .into_iter()
+            .map(|m| super::types::ModelInfo {
+                name: format!("models/{}", m.id),
+                display_name: m
+                    .versioned_name
+                    .unwrap_or_else(|| m.title.clone()),
+                input_token_limit: 1048576,
+                output_token_limit: 65536,
+            })
+            .collect();
+
+        Ok(ModelListResponse { models })
     }
 
     async fn generate_content_via_web(
@@ -260,7 +283,7 @@ mod tests {
             cookies: HashMap::new(),
             api_key: Some("test_api_key".into()),
         };
-        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into(), vec!["gemini-2.5-flash".into()]).unwrap()
+        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into()).unwrap()
     }
 
     fn make_cookie_client() -> GeminiClient {
@@ -271,7 +294,7 @@ mod tests {
             cookies,
             api_key: None,
         };
-        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into(), vec!["gemini-2.5-flash".into()]).unwrap()
+        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into()).unwrap()
     }
 
     #[test]

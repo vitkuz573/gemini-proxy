@@ -67,20 +67,19 @@ pub fn openai_response_to_gemini_request(req: &CreateResponse) -> Result<Generat
                 }
             }
             "developer" | "system" => {
-                if let Some(ref content) = item.content {
-                    if let InputContent::Text(text) = content {
+                if let Some(ref content) = item.content
+                    && let InputContent::Text(text) = content {
                         system_instruction = Some(Parts {
                             parts: vec![Part::Text(TextPart { text: text.clone() })],
                         });
                     }
-                }
             }
             _ => {}
         }
 
         // Handle function_call_output
-        if item.item_type.as_deref() == Some("function_call_output") {
-            if let (Some(call_id), Some(output)) = (&item.call_id, &item.output) {
+        if item.item_type.as_deref() == Some("function_call_output")
+            && let (Some(call_id), Some(output)) = (&item.call_id, &item.output) {
                 let response: serde_json::Value = serde_json::from_str(output)
                     .unwrap_or(serde_json::Value::String(output.clone()));
                 contents.push(Content {
@@ -93,21 +92,19 @@ pub fn openai_response_to_gemini_request(req: &CreateResponse) -> Result<Generat
                     })],
                 });
             }
-        }
     }
 
     // Convert tools
     if let Some(tools) = &req.tools {
         for tool in tools {
-            if tool.tool_type == "function" {
-                if let Some(ref func) = tool.function {
+            if tool.tool_type == "function"
+                && let Some(ref func) = tool.function {
                     function_declarations.push(FunctionDeclaration {
                         name: func.name.clone(),
                         description: func.description.clone(),
                         parameters: func.parameters.clone(),
                     });
                 }
-            }
         }
     }
 
@@ -128,17 +125,15 @@ pub fn openai_response_to_gemini_request(req: &CreateResponse) -> Result<Generat
     };
 
     // Handle text.format
-    if let Some(ref text_config) = req.text {
-        if let Some(ref format) = text_config.format {
-            if format.format_type == "json_object" {
+    if let Some(ref text_config) = req.text
+        && let Some(ref format) = text_config.format
+            && format.format_type == "json_object" {
                 generation_config.response_mime_type = Some("application/json".into());
             }
-        }
-    }
 
     // Handle reasoning
-    if let Some(ref reasoning) = req.reasoning {
-        if let Some(ref effort) = reasoning.effort {
+    if let Some(ref reasoning) = req.reasoning
+        && let Some(ref effort) = reasoning.effort {
             let budget = match effort.as_str() {
                 "low" => Some(1024),
                 "medium" => Some(8192),
@@ -150,7 +145,6 @@ pub fn openai_response_to_gemini_request(req: &CreateResponse) -> Result<Generat
                 thinking_budget: budget,
             });
         }
-    }
 
     let mut tools_list: Vec<GeminiTool> = Vec::new();
     if !function_declarations.is_empty() {
@@ -222,8 +216,8 @@ fn input_content_to_parts(content: &InputContent) -> Result<Vec<Part>> {
                         }
                     }
                     "input_image" => {
-                        if let Some(ref url) = part.image_url {
-                            if let Some((mime, data)) = parse_data_url(url) {
+                        if let Some(ref url) = part.image_url
+                            && let Some((mime, data)) = parse_data_url(url) {
                                 gemini_parts.push(Part::InlineData(InlineDataPart {
                                     inline_data: InlineData {
                                         mime_type: mime,
@@ -231,7 +225,6 @@ fn input_content_to_parts(content: &InputContent) -> Result<Vec<Part>> {
                                     },
                                 }));
                             }
-                        }
                     }
                     _ => {}
                 }
@@ -242,12 +235,11 @@ fn input_content_to_parts(content: &InputContent) -> Result<Vec<Part>> {
 }
 
 fn parse_data_url(url: &str) -> Option<(String, String)> {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((header, data)) = rest.split_once(",") {
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((header, data)) = rest.split_once(",") {
             let mime = header.split(';').next()?.to_string();
             return Some((mime, data.to_string()));
         }
-    }
     None
 }
 

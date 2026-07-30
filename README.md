@@ -60,7 +60,6 @@ Create a `.env` file (or export as environment variables):
 | `DEFAULT_MODEL` | `gemini-2.5-flash` | Default model when none specified in request |
 | `MAX_RETRIES` | `2` | Max retry attempts for upstream requests |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Gemini API base URL |
-| `GEMINI_MODELS` | `gemini-2.5-pro,gemini-2.5-flash,...` | Comma-separated list of available models |
 | `RATE_LIMIT` | `60` | Max requests per minute per IP |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins |
 
@@ -192,6 +191,14 @@ curl http://localhost:3000/v1/messages \
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
+
+## Models
+
+When using an API key (`GEMINI_API_KEY`), the available models are whatever Google exposes through the official Generative Language API.
+
+When using cookie auth (`GEMINI_COOKIES`), the proxy discovers live models from the Gemini web frontend model picker and exposes them as `models/<hex_id>` (e.g. `models/fbb127bbb056c959`). You can still use legacy aliases like `gemini-2.5-flash`; they are mapped heuristically to the current mode IDs.
+
+See [docs/protocol.md](docs/protocol.md) for the full reverse-engineered protocol details.
 
 ## License
 

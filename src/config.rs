@@ -12,7 +12,6 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub default_model: String,
     pub max_retries: u32,
-    pub gemini_models: Vec<String>,
     pub rate_limit: u64,
     pub cors_origins: Vec<String>,
 }
@@ -44,20 +43,6 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2);
 
-        let gemini_models = env::var("GEMINI_MODELS")
-            .ok()
-            .and_then(|v| serde_json::from_str(&v).ok())
-            .unwrap_or_else(|| {
-                vec![
-                    "gemini-2.5-pro".to_string(),
-                    "gemini-2.5-flash".to_string(),
-                    "gemini-2.5-flash-lite".to_string(),
-                    "gemini-3.5-flash".to_string(),
-                    "gemini-3.5-flash-lite".to_string(),
-                    "gemini-3.6-flash".to_string(),
-                ]
-            });
-
         let rate_limit = env::var("RATE_LIMIT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -77,7 +62,6 @@ impl Config {
             auth_token,
             default_model,
             max_retries,
-            gemini_models,
             rate_limit,
             cors_origins,
         })

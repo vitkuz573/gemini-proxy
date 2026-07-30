@@ -73,7 +73,7 @@ mod tests {
             auth_token: None,
             default_model: "gemini-2.5-flash".into(),
             max_retries: 2,
-            gemini_models: vec!["gemini-2.5-flash".into()],
+
             rate_limit: 60,
             cors_origins: vec!["*".to_string()],
         };

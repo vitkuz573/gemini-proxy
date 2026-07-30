@@ -131,7 +131,7 @@ async fn chat_completions(
         let include_usage = request
             .stream_options
             .as_ref()
-            .map_or(false, |o| o.include_usage);
+            .is_some_and(|o| o.include_usage);
         let response = state
             .gemini_client
             .stream_content(&model, &gemini_request)
@@ -530,9 +530,9 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                             }
                         }
                     }
-                } else if line.starts_with('[') {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(&line) {
-                        if let Some(text) =
+                } else if line.starts_with('[')
+                    && let Ok(parsed) = serde_json::from_str::<Value>(&line)
+                        && let Some(text) =
                             crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
                         {
                             let gemini_chunk = GenerateContentResponse {
@@ -606,8 +606,6 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                                 }
                             }
                         }
-                    }
-                }
             }
         }
 
@@ -698,8 +696,7 @@ async fn completions(
         stream_options: None,
         stop: request.get("stop").and_then(|v| {
             if let Some(s) = v.as_str() { Some(vec![s.to_string()]) }
-            else if let Some(arr) = v.as_array() { Some(arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()) }
-            else { None }
+            else { v.as_array().map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()) }
         }),
         presence_penalty: request.get("presence_penalty").and_then(|v| v.as_f64()),
         frequency_penalty: request.get("frequency_penalty").and_then(|v| v.as_f64()),

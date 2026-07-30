@@ -26,11 +26,10 @@ pub fn gemini_finish_reason(reason: Option<String>) -> String {
 }
 
 pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateContentRequest> {
-    if let Some(n) = req.n {
-        if n == 0 || n > 8 {
+    if let Some(n) = req.n
+        && (n == 0 || n > 8) {
             return Err(ProxyError::BadRequest(format!("n must be between 1 and 8, got {n}")));
         }
-    }
 
     let mut system_instruction: Option<Parts> = None;
     let mut contents: Vec<Content> = Vec::new();
@@ -55,11 +54,10 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
             }
             "assistant" => {
                 let mut parts: Vec<Part> = Vec::new();
-                if let Some(text) = &msg.content {
-                    if !text.is_empty() {
+                if let Some(text) = &msg.content
+                    && !text.is_empty() {
                         parts.push(Part::Text(TextPart { text: text.clone() }));
                     }
-                }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
                         let args: serde_json::Value =
@@ -235,8 +233,8 @@ fn msg_to_parts(msg: &Message) -> Result<Vec<Part>> {
                             }
                         }
                         "image_url" => {
-                            if let Some(iu) = &cp.image_url {
-                                if let Some((mime, data)) = parse_data_url(&iu.url) {
+                            if let Some(iu) = &cp.image_url
+                                && let Some((mime, data)) = parse_data_url(&iu.url) {
                                     parts.push(Part::InlineData(InlineDataPart {
                                         inline_data: InlineData {
                                             mime_type: mime,
@@ -244,7 +242,6 @@ fn msg_to_parts(msg: &Message) -> Result<Vec<Part>> {
                                         },
                                     }));
                                 }
-                            }
                         }
                         _ => {}
                     }
@@ -271,12 +268,11 @@ fn msg_to_parts(msg: &Message) -> Result<Vec<Part>> {
 }
 
 fn parse_data_url(url: &str) -> Option<(String, String)> {
-    if let Some(rest) = url.strip_prefix("data:") {
-        if let Some((header, data)) = rest.split_once(",") {
+    if let Some(rest) = url.strip_prefix("data:")
+        && let Some((header, data)) = rest.split_once(",") {
             let mime = header.split(';').next()?.to_string();
             return Some((mime, data.to_string()));
         }
-    }
     None
 }
 
