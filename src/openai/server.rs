@@ -60,14 +60,17 @@ async fn list_models(
     let models: Vec<Model> = gemini_models
         .models
         .into_iter()
-        .map(|m| Model {
-            id: m.name.clone(),
-            object: "model".into(),
-            created: 0,
-            owned_by: "google".into(),
-            permission: vec![],
-            root: m.name,
-            parent: None,
+        .map(|m| {
+            let root = m.root.clone().unwrap_or_else(|| m.name.clone());
+            Model {
+                id: m.name.clone(),
+                object: "model".into(),
+                created: 0,
+                owned_by: "google".into(),
+                permission: vec![],
+                root,
+                parent: None,
+            }
         })
         .collect();
 
@@ -86,17 +89,18 @@ async fn get_model(
     let model = gemini_models
         .models
         .into_iter()
-        .find(|m| m.name == model_id || m.name.ends_with(&format!("/{model_id}")));
+        .find(|m| m.name == model_id || m.root.as_deref() == Some(&model_id));
 
     match model {
         Some(m) => {
+            let root = m.root.clone().unwrap_or_else(|| m.name.clone());
             let model = Model {
                 id: m.name.clone(),
                 object: "model".into(),
                 created: 0,
                 owned_by: "google".into(),
                 permission: vec![],
-                root: m.name,
+                root,
                 parent: None,
             };
             Ok(Json(serde_json::to_value(model)?))

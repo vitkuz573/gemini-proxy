@@ -7,8 +7,9 @@ use crate::error::{ProxyError, Result};
 
 use super::auth::GeminiAuth;
 use super::types::{
-    GenerateContentRequest, GenerateContentResponse, ModelListResponse,
+    GenerateContentRequest, GenerateContentResponse, ModelInfo, ModelListResponse,
 };
+use super::web_frontend::WebModelInfo;
 
 #[derive(Clone)]
 pub struct GeminiClient {
@@ -16,6 +17,7 @@ pub struct GeminiClient {
     auth: GeminiAuth,
     base_url: String,
     web_session: Arc<Mutex<Option<super::web_frontend::WebSession>>>,
+    web_models: Arc<Mutex<Option<Vec<WebModelInfo>>>>,
 }
 
 impl GeminiClient {
@@ -32,6 +34,7 @@ impl GeminiClient {
             auth,
             base_url,
             web_session: Arc::new(Mutex::new(None)),
+            web_models: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -102,19 +105,70 @@ impl GeminiClient {
             *session_guard = Some(web_client.session().clone());
         }
 
-        let models = web_models
-            .into_iter()
+        // Build OpenAI-style human-readable IDs and keep the raw list cached so
+        // that chat requests can resolve `gemini-X.Y-category` back to a hex ID.
+        let models: Vec<ModelInfo> = web_models
+            .iter()
             .map(|m| super::types::ModelInfo {
-                name: format!("models/{}", m.id),
+                name: m.human_id(),
                 display_name: m
                     .versioned_name
+                    .clone()
                     .unwrap_or_else(|| m.title.clone()),
                 input_token_limit: 1048576,
                 output_token_limit: 65536,
+                root: Some(format!("models/{}", m.id)),
             })
             .collect();
 
+        {
+            let mut cache = self.web_models.lock().await;
+            *cache = Some(web_models);
+        }
+
         Ok(ModelListResponse { models })
+    }
+
+    /// Resolve a user-supplied model identifier to the hex mode ID required by
+    /// the web frontend.
+    ///
+    /// Accepted forms:
+    /// - `models/<hex>` — returned unchanged.
+    /// - `gemini-<version>-<category>` — matched against the most recent `/v1/models`
+    ///   list; if the cache is empty it is populated first.
+    pub async fn resolve_web_model(&self, model: &str) -> Result<String> {
+        let stripped = model.strip_prefix("models/").unwrap_or(model);
+
+        // Direct hex ID.
+        if stripped.len() == 16 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(stripped.to_string());
+        }
+
+        // Ensure the model cache is populated.
+        {
+            let cache = self.web_models.lock().await;
+            if let Some(ref models) = *cache
+                && let Some(m) = models.iter().find(|m| m.human_id() == model)
+            {
+                return Ok(m.id.clone());
+            }
+        }
+
+        debug!(model, "model not in cache, refreshing web model list");
+        self.list_models_via_web().await?;
+
+        {
+            let cache = self.web_models.lock().await;
+            if let Some(ref models) = *cache
+                && let Some(m) = models.iter().find(|m| m.human_id() == model)
+            {
+                return Ok(m.id.clone());
+            }
+        }
+
+        Err(ProxyError::BadRequest(format!(
+            "Unknown model '{model}'. Call /v1/models to list available models."
+        )))
     }
 
     async fn generate_content_via_web(
@@ -123,6 +177,8 @@ impl GeminiClient {
         request: &GenerateContentRequest,
     ) -> Result<GenerateContentResponse> {
         use super::web_frontend::WebFrontendClient;
+
+        let mode_id = self.resolve_web_model(model).await?;
 
         let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
         {
@@ -134,7 +190,7 @@ impl GeminiClient {
 
         let prompt = extract_prompt_text(request);
 
-        let response_text = web_client.generate_content(model, &prompt).await?;
+        let response_text = web_client.generate_content(&mode_id, &prompt).await?;
 
         {
             let mut session_guard = self.web_session.lock().await;
@@ -167,6 +223,8 @@ impl GeminiClient {
     ) -> Result<reqwest::Response> {
         use super::web_frontend::WebFrontendClient;
 
+        let mode_id = self.resolve_web_model(model).await?;
+
         let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
         {
             let session_guard = self.web_session.lock().await;
@@ -175,7 +233,7 @@ impl GeminiClient {
             }
         }
         let prompt = extract_prompt_text(request);
-        let response = web_client.stream_generate(model, &prompt).await?;
+        let response = web_client.stream_generate(&mode_id, &prompt).await?;
         {
             let mut session_guard = self.web_session.lock().await;
             *session_guard = Some(web_client.session().clone());

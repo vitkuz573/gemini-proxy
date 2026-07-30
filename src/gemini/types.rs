@@ -225,4 +225,7 @@ pub struct ModelInfo {
     pub input_token_limit: u32,
     #[serde(rename = "outputTokenLimit", default)]
     pub output_token_limit: u32,
+    /// Hex model ID for cookie-auth mode (e.g. `models/fbb127bbb056c959`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
 }

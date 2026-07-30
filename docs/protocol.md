@@ -116,40 +116,46 @@ Each mode is an array. Fields we care about:
 
 ### Mapping to OpenAI model IDs
 
-The proxy exposes each mode as `models/<hex_mode_id>`, matching the ID format
-used by the Google Generative Language API. Examples captured live:
+The proxy derives a stable, human-readable OpenAI-style ID from the versioned
+name: `3.6 Flash` becomes `gemini-3.6-flash`. The raw hex ID is exposed in the
+`root` field so clients can use either form.
 
-| OpenAI ID (`/v1/models`) | Hex mode ID | Title |
-|---------------------------|-------------|-------|
-| `models/cf41b0e0dd7d53e5` | `cf41b0e0dd7d53e5` | 3.5 Flash-Lite |
-| `models/fbb127bbb056c959` | `fbb127bbb056c959` | 3.6 Flash |
-| `models/9d8ca3786ebdfbea` | `9d8ca3786ebdfbea` | 3.1 Pro |
+Example response:
+
+```json
+{
+  "id": "gemini-3.6-flash",
+  "object": "model",
+  "owned_by": "google",
+  "root": "models/fbb127bbb056c959"
+}
+```
+
+Examples captured live:
+
+| OpenAI ID (`/v1/models`) | Hex mode ID (`root`) | Title |
+|---------------------------|----------------------|-------|
+| `gemini-3.5-flash-lite` | `models/cf41b0e0dd7d53e5` | 3.5 Flash-Lite |
+| `gemini-3.6-flash` | `models/fbb127bbb056c959` | 3.6 Flash |
+| `gemini-3.1-pro` | `models/9d8ca3786ebdfbea` | 3.1 Pro |
 
 The hex IDs are **not stable**. Google rotates them between sessions, so
-clients should always call `GET /v1/models` first and use the returned ID for
-subsequent chat requests.
+clients should either use the human-readable ID or call `GET /v1/models` first
+and use the returned `root` for subsequent chat requests.
 
 ## Chat completions
 
 The chat endpoint uses a different batchexecute RPC, `Fd0Qje`, with the same
-query parameters and `at` handling as model discovery. It accepts the selected
-mode as a raw hex ID. The proxy translates any `models/<hex>` model value back
-to that hex ID before building the request body.
+query parameters and `at` handling as model discovery. The proxy resolves the
+requested model to the current hex mode ID:
 
-Resolution order in `resolve_model_mode`:
+1. `models/<hex>` — used unchanged.
+2. `gemini-<version>-<category>` — looked up in the cached `/v1/models` list.
+   If the cache is empty it is populated first.
+3. Anything else returns a 400 with instructions to call `/v1/models`.
 
-1. Strip optional `models/` prefix.
-2. If the value is a 16-character hex string, return it unchanged (this handles
-   the dynamic IDs returned by `/v1/models`).
-3. Otherwise apply keyword heuristics:
-   - `lite` → Flash-Lite hex ID
-   - `thinking` / `deep` → Thinking hex ID
-   - `pro` → Pro hex ID
-   - anything else → Fast hex ID
-
-This keeps both new dynamic IDs and legacy aliases (`current-model`, etc.)
-working. Because hex IDs rotate, the safest path is:
-`GET /v1/models` → use the returned `models/<hex>` value.
+No legacy aliases are supported; the only stable identifiers are the human
+readable IDs returned by `/v1/models`.
 
 ## Implementation pointers
 

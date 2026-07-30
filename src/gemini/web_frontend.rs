@@ -10,11 +10,7 @@ const WEB_BASE_URL: &str = "https://gemini.google.com";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
-/// Hex mode IDs from browser captures (NOT u32 numbers)
-const HEX_MODE_FAST: &str = "fbb127bbb056c959";
-const HEX_MODE_FLASH_LITE: &str = "cf41b0e0dd7d53e5";
-const HEX_MODE_THINKING: &str = "e6fa609c3fa255c0";
-const HEX_MODE_PRO: &str = "9d8ca3786ebdfbea";
+
 
 /// Model information discovered from the Gemini web frontend model picker.
 #[derive(Debug, Clone)]
@@ -29,6 +25,28 @@ pub struct WebModelInfo {
     pub versioned_name: Option<String>,
     /// Mode category: FAST, THINKING, PRO, AUTO, FLASH_LITE, etc.
     pub category: String,
+}
+
+impl WebModelInfo {
+    /// Human-readable OpenAI-style ID derived from the versioned name.
+    ///
+    /// "3.6 Flash" -> "gemini-3.6-flash", "3.1 Pro" -> "gemini-3.1-pro".
+    /// Falls back to a slug of the short title if no versioned name is present.
+    pub fn human_id(&self) -> String {
+        let source = self
+            .versioned_name
+            .as_deref()
+            .or(Some(self.title.as_str()))
+            .unwrap_or("unknown")
+            .to_lowercase();
+        let parts: Vec<&str> = source.split_whitespace().collect();
+        if parts.is_empty() {
+            return "gemini-unknown".into();
+        }
+        let mut normalized = vec!["gemini".to_string()];
+        normalized.extend(parts.iter().map(|s| s.to_string()));
+        normalized.join("-")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -187,13 +205,12 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let mode_id = resolve_model_mode(model);
         let inner_req_list = build_inner_req_list(prompt);
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
 
-        let side_channel = build_side_channel_header(mode_id);
+        let side_channel = build_side_channel_header(model);
         let side_channel_str = side_channel.to_string();
 
         let form_data = [format!("f.req={}", urlencoding::encode(&f_req_str)),
@@ -203,7 +220,7 @@ impl WebFrontendClient {
 
         let headers = self.build_headers();
 
-        debug!(model, mode_id, "Sending request to web frontend");
+        debug!(model, "Sending request to web frontend");
 
         let mut request = self.client.post(&url)
             .query(&params)
@@ -274,13 +291,12 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let mode_id = resolve_model_mode(model);
         let inner_req_list = build_inner_req_list(prompt);
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
 
-        let side_channel = build_side_channel_header(mode_id);
+        let side_channel = build_side_channel_header(model);
         let side_channel_str = side_channel.to_string();
 
         let form_data = [format!("f.req={}", urlencoding::encode(&f_req_str)),
@@ -290,7 +306,7 @@ impl WebFrontendClient {
 
         let headers = self.build_headers();
 
-        debug!(model, mode_id, "Sending streaming request to web frontend");
+        debug!(model, "Sending streaming request to web frontend");
 
         let mut request = self.client.post(&url)
             .query(&params)
@@ -569,52 +585,7 @@ fn derive_category(id: &str, title: &str) -> String {
     }
 }
 
-/// Resolve model name to Google's internal mode ID (hex string).
-///
-/// Accepts either a raw hex mode ID (with or without the `models/` prefix) or a
-/// human-readable alias. This keeps both `/v1/models` IDs and legacy aliases working.
-fn resolve_model_mode(model: &str) -> &'static str {
-    let stripped = model
-        .strip_prefix("models/")
-        .unwrap_or(model)
-        .to_lowercase();
 
-    // Exact hex IDs take precedence. If the caller already passed a valid hex
-    // mode ID (with or without the `models/` prefix), use it directly. This is
-    // essential because dynamic model discovery returns IDs that change over time.
-    if is_hex_mode_id(&stripped) {
-        // We only have static constants for the most common IDs; for any other
-        // valid hex ID we leak a tiny allocation to return it as a string.
-        if stripped == HEX_MODE_FAST {
-            return HEX_MODE_FAST;
-        }
-        if stripped == HEX_MODE_FLASH_LITE {
-            return HEX_MODE_FLASH_LITE;
-        }
-        if stripped == HEX_MODE_THINKING {
-            return HEX_MODE_THINKING;
-        }
-        if stripped == HEX_MODE_PRO {
-            return HEX_MODE_PRO;
-        }
-        return Box::leak(stripped.into_boxed_str());
-    }
-
-    let model_lower = stripped;
-    if model_lower.contains("lite") {
-        HEX_MODE_FLASH_LITE
-    } else if model_lower.contains("deep") || model_lower.contains("thinking") {
-        HEX_MODE_THINKING
-    } else if model_lower.contains("pro") {
-        HEX_MODE_PRO
-    } else {
-        HEX_MODE_FAST
-    }
-}
-
-fn is_hex_mode_id(s: &str) -> bool {
-    s.len() == 16 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
 
 /// Build the inner request list (69-slot array) matching browser captures
 fn build_inner_req_list(prompt: &str) -> Vec<Value> {
