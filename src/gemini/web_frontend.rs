@@ -25,6 +25,8 @@ pub struct WebModelInfo {
     pub versioned_name: Option<String>,
     /// Mode category: FAST, THINKING, PRO, AUTO, FLASH_LITE, etc.
     pub category: String,
+    /// Raw category enum value from the web frontend (used in inner_req_list[30]).
+    pub category_enum: u64,
 }
 
 impl WebModelInfo {
@@ -32,6 +34,10 @@ impl WebModelInfo {
     ///
     /// "3.6 Flash" -> "gemini-3.6-flash", "3.1 Pro" -> "gemini-3.1-pro".
     /// Falls back to a slug of the short title if no versioned name is present.
+    pub(crate) fn derive_category_enum(id: &str, title: &str) -> u64 {
+        derive_category_enum_inner(id, title)
+    }
+
     pub fn human_id(&self) -> String {
         let source = self
             .versioned_name
@@ -174,7 +180,8 @@ impl WebFrontendClient {
 
     pub async fn generate_content(
         &mut self,
-        model: &str,
+        mode_id: &str,
+        category_enum: u64,
         prompt: &str,
     ) -> Result<String> {
         if self.session.access_token.is_none() && self.session.build_label.is_none() {
@@ -205,22 +212,22 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let inner_req_list = build_inner_req_list(prompt);
+        let inner_req_list = build_inner_req_list(prompt, category_enum);
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
 
-        let side_channel = build_side_channel_header(model);
-        let side_channel_str = side_channel.to_string();
+        let _side_channel = build_side_channel_header(mode_id);
 
+        let at = self.session.access_token.as_deref().unwrap_or("");
         let form_data = [format!("f.req={}", urlencoding::encode(&f_req_str)),
-            format!("at={}", urlencoding::encode(&side_channel_str))];
+            format!("at={}", urlencoding::encode(at))];
 
         let body = form_data.join("&");
 
         let headers = self.build_headers();
 
-        debug!(model, "Sending request to web frontend");
+        debug!(mode_id, category_enum, "Sending request to web frontend");
 
         let mut request = self.client.post(&url)
             .query(&params)
@@ -260,7 +267,8 @@ impl WebFrontendClient {
 
     pub async fn stream_generate(
         &mut self,
-        model: &str,
+        mode_id: &str,
+        category_enum: u64,
         prompt: &str,
     ) -> Result<reqwest::Response> {
         if self.session.access_token.is_none() && self.session.build_label.is_none() {
@@ -291,22 +299,22 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let inner_req_list = build_inner_req_list(prompt);
+        let inner_req_list = build_inner_req_list(prompt, category_enum);
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
 
-        let side_channel = build_side_channel_header(model);
-        let side_channel_str = side_channel.to_string();
+        let _side_channel = build_side_channel_header(mode_id);
 
+        let at = self.session.access_token.as_deref().unwrap_or("");
         let form_data = [format!("f.req={}", urlencoding::encode(&f_req_str)),
-            format!("at={}", urlencoding::encode(&side_channel_str))];
+            format!("at={}", urlencoding::encode(at))];
 
         let body = form_data.join("&");
 
         let headers = self.build_headers();
 
-        debug!(model, "Sending streaming request to web frontend");
+        debug!(mode_id, category_enum, "Sending streaming request to web frontend");
 
         let mut request = self.client.post(&url)
             .query(&params)
@@ -533,11 +541,11 @@ fn parse_user_status_model_list(body: &str) -> Result<Vec<WebModelInfo>> {
             .map(|s| s.to_string());
 
         // Category enum at field 17; fall back to deriving from title/hex constants.
-        let category = mode_arr
+        let category_enum = mode_arr
             .get(17)
             .and_then(|v| v.as_u64())
-            .map(category_from_enum)
-            .unwrap_or_else(|| derive_category(&id, &title));
+            .unwrap_or_else(|| derive_category_enum_inner(&id, &title));
+        let category = category_from_enum(category_enum);
 
         result.push(WebModelInfo {
             id,
@@ -545,6 +553,7 @@ fn parse_user_status_model_list(body: &str) -> Result<Vec<WebModelInfo>> {
             description,
             versioned_name,
             category,
+            category_enum,
         });
     }
 
@@ -570,25 +579,25 @@ fn category_from_enum(value: u64) -> String {
     .to_string()
 }
 
-fn derive_category(id: &str, title: &str) -> String {
+fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
     let combined = format!("{id} {title}").to_lowercase();
     if combined.contains("lite") {
-        "FLASH_LITE".to_string()
+        6
     } else if combined.contains("thinking") || combined.contains("deep") {
-        "THINKING".to_string()
+        2
     } else if combined.contains("pro") {
-        "PRO".to_string()
+        3
     } else if combined.contains("auto") {
-        "AUTO".to_string()
+        4
     } else {
-        "FAST".to_string()
+        1
     }
 }
 
 
 
 /// Build the inner request list (69-slot array) matching browser captures
-fn build_inner_req_list(prompt: &str) -> Vec<Value> {
+fn build_inner_req_list(prompt: &str, category_enum: u64) -> Vec<Value> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -605,7 +614,7 @@ fn build_inner_req_list(prompt: &str) -> Vec<Value> {
     inner[17] = json!([[0]]);
     inner[18] = json!(0);
     inner[27] = json!(1);
-    inner[30] = json!([4]);
+    inner[30] = json!([category_enum]);
     inner[53] = json!(0);
     inner[59] = json!("CD1035A5-0E0E-4B68-B744-23C2D8960DF5");
     inner[61] = json!([]);

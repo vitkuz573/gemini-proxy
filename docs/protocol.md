@@ -112,7 +112,7 @@ Each mode is an array. Fields we care about:
 | `1`   | Display title (e.g. `3.6 Flash`) |
 | `2`   | Description |
 | `11` / `19` | Long versioned name (e.g. `Gemini 3.6 Flash`) |
-| `17`  | Category enum: `1` = Auto, `2` = Fast, `4` = Thinking, `5` = Pro, `6` = Flash-Lite |
+| `17`  | Category enum: `1` = Fast, `2` = Thinking, `3` = Pro, `4` = Auto, `5` = Fast-Dynamic-Thinking, `6` = Flash-Lite |
 
 ### Mapping to OpenAI model IDs
 
@@ -145,11 +145,12 @@ and use the returned `root` for subsequent chat requests.
 
 ## Chat completions
 
-The chat endpoint uses a different batchexecute RPC, `Fd0Qje`, with the same
-query parameters and `at` handling as model discovery. The proxy resolves the
-requested model to the current hex mode ID:
+The chat endpoint uses `StreamGenerate` (`assistant.lamda.BardFrontendService/StreamGenerate`)
+with the same query parameters and `at` handling as model discovery. The proxy
+resolves the requested model to the current hex mode ID and its category:
 
-1. `models/<hex>` — used unchanged.
+1. `models/<hex>` — used unchanged; category is inferred from the cached model
+   list or from the hex ID/name.
 2. `gemini-<version>-<category>` — looked up in the cached `/v1/models` list.
    If the cache is empty it is populated first.
 3. Anything else returns a 400 with instructions to call `/v1/models`.
@@ -157,10 +158,38 @@ requested model to the current hex mode ID:
 No legacy aliases are supported; the only stable identifiers are the human
 readable IDs returned by `/v1/models`.
 
+## Reasoning / thinking passthrough
+
+`reasoning_effort` (OpenAI) and `thinking` (Anthropic) are converted to Gemini's
+`thinking_config` in `GenerationConfig`. When an API key is configured, this
+config is forwarded to the official Generative Language API and the model will
+return explicit reasoning/thoughts when supported.
+
+In cookie-auth mode the proxy talks to the Gemini web frontend, which does **not**
+expose a dedicated thinking mode for all accounts. The request body sent to the
+frontend contains a mode category (`inner_req_list[30]`) that is set from the
+model picker enum:
+
+| Enum | Category |
+|------|----------|
+| `1`  | Fast |
+| `2`  | Thinking |
+| `3`  | Pro |
+| `4`  | Auto |
+| `5`  | Fast-Dynamic-Thinking |
+| `6`  | Flash-Lite |
+
+If the account only lists Fast/Pro/Flash-Lite models (no enum `2` mode),
+thinking requests are still served by the selected model, but the response will
+contain inline reasoning rather than separate thinking blocks. There is no known
+frontend field to force a thinking-style response beyond selecting the Pro/Auto
+category.
+
 ## Implementation pointers
 
 - `src/gemini/web_frontend.rs` — `WebFrontendClient::list_models`,
-  `parse_user_status_model_list`, and `resolve_model_mode`.
-- `src/gemini/client.rs` — `GeminiClient::list_models_via_web` wires the
-  dynamic list into the public API.
-- `src/openai/server.rs` — `/v1/models` and `/v1/models/{model}` handlers.
+  `parse_user_status_model_list`, `build_inner_req_list`, and
+  `extract_snlim0e`.
+- `src/gemini/client.rs` — `GeminiClient::list_models_via_web` and
+  `resolve_web_model` wire the dynamic list into the public API.
+- `src/openai/server.rs` — `/v1/models` and `/v1/chat/completions` handlers.

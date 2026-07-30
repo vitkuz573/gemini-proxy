@@ -129,19 +129,28 @@ impl GeminiClient {
         Ok(ModelListResponse { models })
     }
 
-    /// Resolve a user-supplied model identifier to the hex mode ID required by
-    /// the web frontend.
+    /// Resolve a user-supplied model identifier to the hex mode ID and category
+    /// required by the web frontend.
     ///
     /// Accepted forms:
-    /// - `models/<hex>` — returned unchanged.
+    /// - `models/<hex>` — returned unchanged; category is inferred from cached models
+    ///   or heuristics.
     /// - `gemini-<version>-<category>` — matched against the most recent `/v1/models`
     ///   list; if the cache is empty it is populated first.
-    pub async fn resolve_web_model(&self, model: &str) -> Result<String> {
+    pub async fn resolve_web_model(&self, model: &str) -> Result<(String, u64)> {
         let stripped = model.strip_prefix("models/").unwrap_or(model);
 
         // Direct hex ID.
         if stripped.len() == 16 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Ok(stripped.to_string());
+            let cat = self
+                .web_models
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|models| models.iter().find(|m| m.id == stripped))
+                .map(|m| m.category_enum)
+                .unwrap_or_else(|| super::web_frontend::WebModelInfo::derive_category_enum(stripped, ""));
+            return Ok((stripped.to_string(), cat));
         }
 
         // Ensure the model cache is populated.
@@ -150,7 +159,7 @@ impl GeminiClient {
             if let Some(ref models) = *cache
                 && let Some(m) = models.iter().find(|m| m.human_id() == model)
             {
-                return Ok(m.id.clone());
+                return Ok((m.id.clone(), m.category_enum));
             }
         }
 
@@ -162,7 +171,7 @@ impl GeminiClient {
             if let Some(ref models) = *cache
                 && let Some(m) = models.iter().find(|m| m.human_id() == model)
             {
-                return Ok(m.id.clone());
+                return Ok((m.id.clone(), m.category_enum));
             }
         }
 
@@ -178,7 +187,7 @@ impl GeminiClient {
     ) -> Result<GenerateContentResponse> {
         use super::web_frontend::WebFrontendClient;
 
-        let mode_id = self.resolve_web_model(model).await?;
+        let (mode_id, category_enum) = self.resolve_web_model(model).await?;
 
         let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
         {
@@ -190,7 +199,7 @@ impl GeminiClient {
 
         let prompt = extract_prompt_text(request);
 
-        let response_text = web_client.generate_content(&mode_id, &prompt).await?;
+        let response_text = web_client.generate_content(&mode_id, category_enum, &prompt).await?;
 
         {
             let mut session_guard = self.web_session.lock().await;
@@ -223,7 +232,7 @@ impl GeminiClient {
     ) -> Result<reqwest::Response> {
         use super::web_frontend::WebFrontendClient;
 
-        let mode_id = self.resolve_web_model(model).await?;
+        let (mode_id, category_enum) = self.resolve_web_model(model).await?;
 
         let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
         {
@@ -233,7 +242,7 @@ impl GeminiClient {
             }
         }
         let prompt = extract_prompt_text(request);
-        let response = web_client.stream_generate(&mode_id, &prompt).await?;
+        let response = web_client.stream_generate(&mode_id, category_enum, &prompt).await?;
         {
             let mut session_guard = self.web_session.lock().await;
             *session_guard = Some(web_client.session().clone());
@@ -309,6 +318,14 @@ impl GeminiClient {
 
 fn extract_prompt_text(request: &GenerateContentRequest) -> String {
     let mut text_parts = Vec::new();
+
+    if let Some(ref system) = request.system_instruction {
+        for part in &system.parts {
+            if let super::types::Part::Text(text_part) = part {
+                text_parts.push(format!("System: {}", text_part.text));
+            }
+        }
+    }
 
     for content in &request.contents {
         for part in &content.parts {
