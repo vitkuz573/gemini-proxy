@@ -452,7 +452,7 @@ mod tests {
             response_id: None,
         };
 
-        let anthropic_resp = gemini_to_anthropic_response(gemini_resp, "gemini-2.5-flash").unwrap();
+        let anthropic_resp = gemini_to_anthropic_response(gemini_resp, "current-model").unwrap();
         assert_eq!(anthropic_resp.response_type, "message");
         assert_eq!(anthropic_resp.role, "assistant");
         assert_eq!(anthropic_resp.content.len(), 1);
@@ -483,7 +483,7 @@ mod tests {
             response_id: None,
         };
 
-        let anthropic_resp = gemini_to_anthropic_response(gemini_resp, "gemini-2.5-flash").unwrap();
+        let anthropic_resp = gemini_to_anthropic_response(gemini_resp, "current-model").unwrap();
         assert_eq!(anthropic_resp.content.len(), 1);
         match &anthropic_resp.content[0] {
             ContentBlock::ToolUse { name, .. } => {

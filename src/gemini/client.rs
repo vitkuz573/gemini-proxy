@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn test_build_url_with_api_key_existing_query() {
         let client = make_api_key_client();
-        let url = client.build_url("/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse");
+        let url = client.build_url("/v1beta/models/current-model:streamGenerateContent?alt=sse");
         assert!(url.contains("alt=sse"));
         assert!(!url.contains("key="));
     }

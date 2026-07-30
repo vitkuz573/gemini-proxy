@@ -57,7 +57,7 @@ Create a `.env` file (or export as environment variables):
 | `GEMINI_COOKIES` | -- | Browser cookies string for web frontend auth |
 | `GEMINI_API_KEY` | -- | Google AI API key |
 | `AUTH_TOKEN` | -- | Bearer token to protect the proxy endpoint |
-| `DEFAULT_MODEL` | `gemini-2.5-flash` | Default model when none specified in request |
+| `DEFAULT_MODEL` | `current-model` | Default model when none specified in request |
 | `MAX_RETRIES` | `2` | Max retry attempts for upstream requests |
 | `GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | Gemini API base URL |
 | `RATE_LIMIT` | `60` | Max requests per minute per IP |
@@ -96,7 +96,7 @@ GEMINI_COOKIES=__Secure-1PSID=...; __Secure-1PAPISID=...; ...
 curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.5-flash",
+    "model": "current-model",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
@@ -104,7 +104,7 @@ curl http://localhost:3000/v1/chat/completions \
 curl http://localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.5-flash",
+    "model": "current-model",
     "messages": [{"role": "user", "content": "Tell me a story"}],
     "stream": true
   }'
@@ -114,7 +114,7 @@ curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer your-token" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.5-flash",
+    "model": "current-model",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
@@ -130,7 +130,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="gemini-2.5-flash",
+    model="current-model",
     messages=[{"role": "user", "content": "Hello!"}]
 )
 print(response.choices[0].message.content)
@@ -147,7 +147,7 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="gemini-2.5-flash",
+    model="current-model",
     input="Hello!"
 )
 print(response.output[0].content[0].text)
@@ -158,7 +158,7 @@ print(response.output[0].content[0].text)
 curl http://localhost:3000/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.5-flash",
+    "model": "current-model",
     "input": "What is the capital of France?"
   }'
 ```
@@ -174,7 +174,7 @@ client = anthropic.Anthropic(
 )
 
 message = client.messages.create(
-    model="gemini-2.5-flash",
+    model="current-model",
     max_tokens=1024,
     messages=[{"role": "user", "content": "Hello!"}]
 )
@@ -186,7 +186,7 @@ print(message.content[0].text)
 curl http://localhost:3000/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gemini-2.5-flash",
+    "model": "current-model",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
@@ -196,7 +196,7 @@ curl http://localhost:3000/v1/messages \
 
 When using an API key (`GEMINI_API_KEY`), the available models are whatever Google exposes through the official Generative Language API.
 
-When using cookie auth (`GEMINI_COOKIES`), the proxy discovers live models from the Gemini web frontend model picker and exposes them as `models/<hex_id>` (e.g. `models/fbb127bbb056c959`). You can still use legacy aliases like `gemini-2.5-flash`; they are mapped heuristically to the current mode IDs.
+When using cookie auth (`GEMINI_COOKIES`), the proxy discovers live models from the Gemini web frontend model picker and exposes them as `models/<hex_id>` (e.g. `models/fbb127bbb056c959`). You can still use legacy aliases like `current-model`; they are mapped heuristically to the current mode IDs.
 
 See [docs/protocol.md](docs/protocol.md) for the full reverse-engineered protocol details.
 

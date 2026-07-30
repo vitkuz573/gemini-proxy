@@ -417,7 +417,7 @@ mod tests {
 
     fn test_openai_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "gemini-2.5-flash".into(),
+            model: "current-model".into(),
             messages: vec![
                 Message {
                     role: "system".into(),
@@ -494,7 +494,7 @@ mod tests {
     #[test]
     fn convert_assistant_with_tool_calls() {
         let req = ChatCompletionRequest {
-            model: "gemini-2.5-flash".into(),
+            model: "current-model".into(),
             messages: vec![Message {
                 role: "assistant".into(),
                 content: Some("Let me check.".into()),
@@ -547,7 +547,7 @@ mod tests {
     #[test]
     fn convert_tool_response_message() {
         let req = ChatCompletionRequest {
-            model: "gemini-2.5-flash".into(),
+            model: "current-model".into(),
             messages: vec![Message {
                 role: "tool".into(),
                 content: Some("{\"temp\":\"22C\"}".into()),
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn convert_tools_to_declarations() {
         let req = ChatCompletionRequest {
-            model: "gemini-2.5-flash".into(),
+            model: "current-model".into(),
             messages: vec![Message {
                 role: "user".into(),
                 content: Some("Hi".into()),
@@ -641,7 +641,7 @@ mod tests {
     #[test]
     fn convert_json_response_format() {
         let req = ChatCompletionRequest {
-            model: "gemini-2.5-flash".into(),
+            model: "current-model".into(),
             messages: vec![Message {
                 role: "user".into(),
                 content: Some("Hi".into()),
@@ -706,10 +706,10 @@ mod tests {
             response_id: None,
         };
 
-        let openai_resp = gemini_to_openai_response(gemini_resp, "gemini-2.5-flash").unwrap();
+        let openai_resp = gemini_to_openai_response(gemini_resp, "current-model").unwrap();
 
         assert_eq!(openai_resp.object, "chat.completion");
-        assert_eq!(openai_resp.model, "gemini-2.5-flash");
+        assert_eq!(openai_resp.model, "current-model");
         assert_eq!(openai_resp.choices.len(), 1);
         assert_eq!(
             openai_resp.choices[0].message.content,
@@ -746,7 +746,7 @@ mod tests {
             response_id: None,
         };
 
-        let openai_resp = gemini_to_openai_response(gemini_resp, "gemini-2.5-flash").unwrap();
+        let openai_resp = gemini_to_openai_response(gemini_resp, "current-model").unwrap();
 
         assert!(openai_resp.choices[0].message.content.is_none());
         let tool_calls = openai_resp.choices[0].message.tool_calls.as_ref().unwrap();
@@ -769,7 +769,7 @@ mod tests {
             response_id: None,
         };
 
-        let openai_resp = gemini_to_openai_response(gemini_resp, "gemini-2.5-flash").unwrap();
+        let openai_resp = gemini_to_openai_response(gemini_resp, "current-model").unwrap();
 
         assert!(openai_resp.choices[0].message.content.is_none());
         assert_eq!(
@@ -787,7 +787,7 @@ mod tests {
             response_id: None,
         };
 
-        let result = gemini_to_openai_response(gemini_resp, "gemini-2.5-flash");
+        let result = gemini_to_openai_response(gemini_resp, "current-model");
         assert!(result.is_err());
     }
 

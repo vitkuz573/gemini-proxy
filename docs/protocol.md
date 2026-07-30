@@ -101,7 +101,7 @@ Resolution order in `resolve_model_mode`:
    - `pro` → Pro hex ID
    - anything else → Fast hex ID
 
-This keeps both new dynamic IDs and legacy aliases (`gemini-2.5-flash`, etc.)
+This keeps both new dynamic IDs and legacy aliases (`current-model`, etc.)
 working.
 
 ## Implementation pointers

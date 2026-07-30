@@ -17,7 +17,7 @@ fn make_config() -> Config {
         gemini_cookies: HashMap::new(),
         gemini_api_key: Some("test_key".into()),
         auth_token: None,
-        default_model: "gemini-2.5-flash".into(),
+        default_model: "current-model".into(),
         max_retries: 2,
         rate_limit: 60,
         cors_origins: vec!["*".to_string()],
@@ -101,7 +101,7 @@ async fn test_chat_completions_without_auth_returns_401_when_auth_required() {
     let app = create_router(state);
 
     let body = json!({
-        "model": "gemini-2.5-flash",
+        "model": "current-model",
         "messages": [{"role": "user", "content": "Hi"}]
     });
 
@@ -132,7 +132,7 @@ async fn test_chat_completions_with_wrong_auth_returns_401() {
     let app = create_router(state);
 
     let body = json!({
-        "model": "gemini-2.5-flash",
+        "model": "current-model",
         "messages": [{"role": "user", "content": "Hi"}]
     });
 
@@ -164,7 +164,7 @@ async fn test_chat_completions_with_valid_auth_reaches_upstream() {
     let app = create_router(state);
 
     let body = json!({
-        "model": "gemini-2.5-flash",
+        "model": "current-model",
         "messages": [{"role": "user", "content": "Hi"}]
     });
 
@@ -210,7 +210,7 @@ async fn test_get_model_endpoint_reaches_upstream() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/v1/models/gemini-2.5-flash")
+                .uri("/v1/models/current-model")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -272,7 +272,7 @@ async fn test_auth_token_none_allows_unauthenticated() {
     let app = create_router(state);
 
     let body = json!({
-        "model": "gemini-2.5-flash",
+        "model": "current-model",
         "messages": [{"role": "user", "content": "Hi"}]
     });
 

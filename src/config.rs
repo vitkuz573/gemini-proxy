@@ -36,7 +36,7 @@ impl Config {
             .filter(|s| !s.is_empty());
 
         let default_model = env::var("DEFAULT_MODEL")
-            .unwrap_or_else(|_| "gemini-2.5-flash".into());
+            .unwrap_or_else(|_| "current-model".into());
 
         let max_retries = env::var("MAX_RETRIES")
             .ok()
