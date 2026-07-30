@@ -77,6 +77,9 @@ GEMINI_API_KEY=AIzaSy...
 GEMINI_COOKIES=__Secure-1PSID=...; __Secure-1PAPISID=...; ...
 ```
 
+Cookies rotate and expire. If `/v1/models` starts returning errors, refresh
+`GEMINI_COOKIES` from a live browser session.
+
 ## API Endpoints
 
 | Method | Path | Description |

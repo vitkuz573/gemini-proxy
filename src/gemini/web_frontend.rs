@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 use crate::error::{ProxyError, Result};
 
@@ -131,13 +131,14 @@ impl WebFrontendClient {
             .await
             .map_err(|e| ProxyError::GeminiApi(format!("Failed to read response body: {e}")))?;
 
-        // SNlM0e token is optional — Google removed it from HTML in April 2026.
-        // Requests still work without it for basic text generation.
+        // SNlM0e ("at" parameter) was removed from the /app HTML around mid-2026.
+        // batchexecute requests now succeed with an empty or dummy `at` value,
+        // so we keep the extractor only as a defensive fallback and never warn.
         if let Some(token) = extract_snlim0e(&body) {
             debug!("Extracted SNlM0e token");
             self.session.access_token = Some(token);
         } else {
-            warn!("SNlM0e token not found in page — proceeding without it (may fail for authenticated requests)");
+            debug!("SNlM0e token not present in /app HTML; using empty `at`");
         }
 
         if let Some(label) = extract_build_label(&body) {
@@ -348,12 +349,13 @@ impl WebFrontendClient {
         };
 
         let mut params = vec![
-            ("rpcids", "otAQ7b"),
+            ("rpcids", "Fd0Qje"),
             ("source-path", "/app"),
             ("hl", self.session.language.as_str()),
             ("_reqid", reqid.as_str()),
             ("rt", "c"),
             ("pageId", "none"),
+            ("authuser", "0"),
         ];
 
         if let Some(ref bl) = self.session.build_label {
@@ -577,8 +579,12 @@ fn resolve_model_mode(model: &str) -> &'static str {
         .unwrap_or(model)
         .to_lowercase();
 
-    // Exact hex IDs discovered via GetUserStatus take precedence.
+    // Exact hex IDs take precedence. If the caller already passed a valid hex
+    // mode ID (with or without the `models/` prefix), use it directly. This is
+    // essential because dynamic model discovery returns IDs that change over time.
     if is_hex_mode_id(&stripped) {
+        // We only have static constants for the most common IDs; for any other
+        // valid hex ID we leak a tiny allocation to return it as a string.
         if stripped == HEX_MODE_FAST {
             return HEX_MODE_FAST;
         }
@@ -591,7 +597,7 @@ fn resolve_model_mode(model: &str) -> &'static str {
         if stripped == HEX_MODE_PRO {
             return HEX_MODE_PRO;
         }
-        // Unknown hex ID: fall through to the heuristic below for a best-effort mapping.
+        return Box::leak(stripped.into_boxed_str());
     }
 
     let model_lower = stripped;
@@ -655,34 +661,31 @@ fn build_side_channel_header(mode_id: &str) -> Value {
     ])
 }
 
-/// Extract SNlM0e token from HTML page
+/// Extract SNlM0e token from the `/app` HTML page.
+///
+/// The token lives inside `window.WIZ_global_data` as `"SNlM0e":"<token>:<timestamp>"`.
+/// Both the base part and the `:` + 13-digit timestamp suffix are required by
+/// batchexecute; stripping the suffix causes HTTP 400.
 fn extract_snlim0e(body: &str) -> Option<String> {
-    let patterns = [
-        "SNlM0e\":\"",
-        "AF_initDataCallback({key: 'ds:1', hash:",
-        "window.APP_OPTIONS",
-    ];
-
-    for pattern in &patterns {
-        if let Some(idx) = body.find(pattern) {
-            let start = idx + pattern.len();
-            if let Some(end) = body[start..].find('"') {
-                let token = &body[start..start + end];
-                if !token.is_empty() {
-                    return Some(token.to_string());
-                }
+    // Primary pattern used in current HTML.
+    if let Some(idx) = body.find("\"SNlM0e\":\"") {
+        let start = idx + "\"SNlM0e\":\"".len();
+        if let Some(end) = body[start..].find('"') {
+            let token = &body[start..start + end];
+            if token.len() > 10 {
+                return Some(token.to_string());
             }
         }
     }
 
-    // Fallback: look for SNlM0e in various formats
+    // Fallback for older/obfuscated page variants.
     if let Some(idx) = body.find("SNlM0e") {
         let search_area = &body[idx..];
         if let Some(eq_idx) = search_area.find("=\"") {
             let start = eq_idx + 2;
             if let Some(end) = search_area[start..].find('"') {
                 let token = &search_area[start..start + end];
-                if !token.is_empty() {
+                if token.len() > 10 {
                     return Some(token.to_string());
                 }
             }
