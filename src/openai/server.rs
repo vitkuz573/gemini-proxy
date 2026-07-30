@@ -123,11 +123,12 @@ async fn chat_completions(
         }
     }
 
-    let model = if request.model.is_empty() {
-        state.config.default_model.clone()
-    } else {
-        request.model.clone()
-    };
+    if request.model.is_empty() {
+        return Err(ProxyError::BadRequest(
+            "Missing 'model' field. Call /v1/models to list available models.".into(),
+        ));
+    }
+    let model = request.model.clone();
 
     let gemini_request = openai_to_gemini_request(&request)?;
 
@@ -165,11 +166,12 @@ async fn create_response(
         }
     }
 
-    let model = if request.model.is_empty() {
-        state.config.default_model.clone()
-    } else {
-        request.model.clone()
-    };
+    if request.model.is_empty() {
+        return Err(ProxyError::BadRequest(
+            "Missing 'model' field. Call /v1/models to list available models.".into(),
+        ));
+    }
+    let model = request.model.clone();
 
     let gemini_request =
         crate::openai::responses_converter::openai_response_to_gemini_request(&request)?;

@@ -10,7 +10,6 @@ pub struct Config {
     pub gemini_cookies: HashMap<String, String>,
     pub gemini_api_key: Option<String>,
     pub auth_token: Option<String>,
-    pub default_model: String,
     pub max_retries: u32,
     pub rate_limit: u64,
     pub cors_origins: Vec<String>,
@@ -35,9 +34,6 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty());
 
-        let default_model = env::var("DEFAULT_MODEL")
-            .unwrap_or_else(|_| "current-model".into());
-
         let max_retries = env::var("MAX_RETRIES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -60,7 +56,6 @@ impl Config {
             gemini_cookies,
             gemini_api_key,
             auth_token,
-            default_model,
             max_retries,
             rate_limit,
             cors_origins,

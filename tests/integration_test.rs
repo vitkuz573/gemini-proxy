@@ -17,7 +17,6 @@ fn make_config() -> Config {
         gemini_cookies: HashMap::new(),
         gemini_api_key: Some("test_key".into()),
         auth_token: None,
-        default_model: "current-model".into(),
         max_retries: 2,
         rate_limit: 60,
         cors_origins: vec!["*".to_string()],
@@ -222,7 +221,7 @@ async fn test_get_model_endpoint_reaches_upstream() {
 }
 
 #[tokio::test]
-async fn test_chat_completions_empty_model_uses_default() {
+async fn test_chat_completions_empty_model_returns_400() {
     let state = app_state();
     let app = create_router(state);
 
@@ -243,8 +242,7 @@ async fn test_chat_completions_empty_model_uses_default() {
         .await
         .unwrap();
 
-    // Still fails upstream but confirms the handler accepted the request
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

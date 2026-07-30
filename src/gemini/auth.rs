@@ -71,9 +71,7 @@ mod tests {
             gemini_cookies: HashMap::new(),
             gemini_api_key: None,
             auth_token: None,
-            default_model: "current-model".into(),
             max_retries: 2,
-
             rate_limit: 60,
             cors_origins: vec!["*".to_string()],
         };

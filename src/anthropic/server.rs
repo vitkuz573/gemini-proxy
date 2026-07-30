@@ -45,11 +45,12 @@ async fn messages(
         }
     }
 
-    let model = if request.model.is_empty() {
-        state.config.default_model.clone()
-    } else {
-        request.model.clone()
-    };
+    if request.model.is_empty() {
+        return Err(ProxyError::BadRequest(
+            "Missing 'model' field. Call /v1/models to list available models.".into(),
+        ));
+    }
+    let model = request.model.clone();
 
     let gemini_request = anthropic_to_gemini_request(&request)?;
 
