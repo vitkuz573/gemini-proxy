@@ -466,10 +466,29 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                         };
 
                         let mut chunk_text = String::new();
+                        let mut chunk_tool_calls: Vec<crate::openai::types::ToolCallDelta> = Vec::new();
                         if let Some(ref content) = candidate.content {
                             for part in &content.parts {
-                                if let crate::gemini::types::ResponsePart::Text(tp) = part {
-                                    chunk_text.push_str(&tp.text);
+                                match part {
+                                    crate::gemini::types::ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
+                                    crate::gemini::types::ResponsePart::Thought(tp) => {
+                                        chunk_text.push_str("<thinking>");
+                                        chunk_text.push_str(&tp.text);
+                                        chunk_text.push_str("</thinking>");
+                                    }
+                                    crate::gemini::types::ResponsePart::FunctionCall(fc) => {
+                                        let args_str = serde_json::to_string(&fc.function_call.args)
+                                            .unwrap_or_else(|_| "{}".into());
+                                        chunk_tool_calls.push(crate::openai::types::ToolCallDelta {
+                                            index: 0,
+                                            id: Some(crate::openai::converter::generate_id()),
+                                            tool_type: Some("function".into()),
+                                            function: Some(crate::openai::types::FunctionCallDelta {
+                                                name: Some(fc.function_call.name.clone()),
+                                                arguments: Some(args_str),
+                                            }),
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -478,7 +497,7 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                             crate::openai::converter::gemini_finish_reason(Some(r.clone()))
                         });
 
-                        if !sent_initial && !chunk_text.is_empty() {
+                        if !sent_initial && (!chunk_text.is_empty() || !chunk_tool_calls.is_empty()) {
                             sent_initial = true;
                             let initial = json!({
                                 "id": id,
@@ -510,6 +529,23 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                                 "choices": [{
                                     "index": 0,
                                     "delta": {"content": delta},
+                                    "finish_reason": null
+                                }]
+                            });
+                            if let Ok(s) = serde_json::to_string(&chunk_json) {
+                                let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+                            }
+                        }
+
+                        if !chunk_tool_calls.is_empty() {
+                            let chunk_json = json!({
+                                "id": id,
+                                "object": "chat.completion.chunk",
+                                "created": created,
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"tool_calls": chunk_tool_calls},
                                     "finish_reason": null
                                 }]
                             });
@@ -564,15 +600,34 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                             };
 
                             let mut chunk_text = String::new();
+                            let mut chunk_tool_calls: Vec<crate::openai::types::ToolCallDelta> = Vec::new();
                             if let Some(ref content) = candidate.content {
                                 for part in &content.parts {
-                                    if let crate::gemini::types::ResponsePart::Text(tp) = part {
-                                        chunk_text.push_str(&tp.text);
+                                    match part {
+                                        crate::gemini::types::ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
+                                        crate::gemini::types::ResponsePart::Thought(tp) => {
+                                            chunk_text.push_str("<thinking>");
+                                            chunk_text.push_str(&tp.text);
+                                            chunk_text.push_str("</thinking>");
+                                        }
+                                        crate::gemini::types::ResponsePart::FunctionCall(fc) => {
+                                            let args_str = serde_json::to_string(&fc.function_call.args)
+                                                .unwrap_or_else(|_| "{}".into());
+                                            chunk_tool_calls.push(crate::openai::types::ToolCallDelta {
+                                                index: 0,
+                                                id: Some(crate::openai::converter::generate_id()),
+                                                tool_type: Some("function".into()),
+                                                function: Some(crate::openai::types::FunctionCallDelta {
+                                                    name: Some(fc.function_call.name.clone()),
+                                                    arguments: Some(args_str),
+                                                }),
+                                            });
+                                        }
                                     }
                                 }
                             }
 
-                            if !sent_initial && !chunk_text.is_empty() {
+                            if !sent_initial && (!chunk_text.is_empty() || !chunk_tool_calls.is_empty()) {
                                 sent_initial = true;
                                 let initial = json!({
                                     "id": id,
@@ -611,8 +666,25 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                                     let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
                                 }
                             }
+
+                            if !chunk_tool_calls.is_empty() {
+                                let chunk_json = json!({
+                                    "id": id,
+                                    "object": "chat.completion.chunk",
+                                    "created": created,
+                                    "model": model,
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {"tool_calls": chunk_tool_calls},
+                                        "finish_reason": null
+                                    }]
+                                });
+                                if let Ok(s) = serde_json::to_string(&chunk_json) {
+                                    let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+                                }
+                            }
                         }
-            }
+                }
         }
 
         if !sent_finish {

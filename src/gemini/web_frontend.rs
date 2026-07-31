@@ -212,10 +212,7 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let merged_request = merge_system_into_prompt(request);
-        let prompt = extract_prompt_text(&merged_request);
-        let system_instruction = extract_system_instruction(&merged_request);
-        let inner_req_list = build_inner_req_list(&prompt, category_enum, system_instruction.as_deref());
+        let inner_req_list = build_inner_req_list(request, category_enum);
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
@@ -302,10 +299,7 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let merged_request = merge_system_into_prompt(request);
-        let prompt = extract_prompt_text(&merged_request);
-        let system_instruction = extract_system_instruction(&merged_request);
-        let inner_req_list = build_inner_req_list(&prompt, category_enum, system_instruction.as_deref());
+        let inner_req_list = build_inner_req_list(request, category_enum);
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
@@ -621,15 +615,23 @@ fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
 /// - slot 79 -> field 80 -> unknown int
 /// - slot 91 -> field 92 -> unknown int
 /// - slot 96 -> field 97 -> unknown int
+///
+/// Because the live frontend maintains conversation state server-side (via
+/// conversationId/Iq/J2) and the 97-slot array only carries the current turn,
+/// this builder serialises the full OpenAI/Anthropic request surface into the
+/// prompt text: system/developer instructions, multi-turn history, tool
+/// declarations, and a thinking hint.  The category enum is still respected so
+/// callers can select a thinking model for reasoning requests.
 fn build_inner_req_list(
-    prompt: &str,
+    request: &crate::gemini::types::GenerateContentRequest,
     category_enum: u64,
-    system_instruction: Option<&str>,
 ) -> Vec<Value> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+
+    let prompt = serialize_request_to_prompt(request);
 
     let mut inner: Vec<Value> = vec![Value::Null; 97];
     inner[0] = json!([prompt, 0, null, null, null, null, 0]);
@@ -657,79 +659,138 @@ fn build_inner_req_list(
     inner[91] = json!(0);
     inner[96] = json!(0);
 
-    if let Some(sys) = system_instruction {
-        inner[33] = json!([sys, 0, null, null, null, null, 0]);
-    }
-
     inner
 }
 
-fn extract_prompt_text(request: &crate::gemini::types::GenerateContentRequest) -> String {
-    let mut text_parts = Vec::new();
+/// Serialize a full GenerateContentRequest into a single prompt string.
+///
+/// The Gemini web frontend only reads the current turn from slot 0, so we have
+/// to embed system instructions, prior turns, tool declarations, and thinking
+/// hints into the text itself.  The format uses explicit XML-style markers so
+/// the model can distinguish roles and structured data.
+fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRequest) -> String {
+    use crate::gemini::types::Part;
 
-    for content in &request.contents {
-        for part in &content.parts {
-            match part {
-                crate::gemini::types::Part::Text(text_part) => {
-                    text_parts.push(text_part.text.clone());
-                }
-                _ => {
-                    text_parts.push("[non-text content]".to_string());
-                }
-            }
+    let mut sections: Vec<String> = Vec::new();
+
+    // System / developer instruction.
+    if let Some(sys) = &request.system_instruction {
+        let text = sys
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            sections.push(format!("<system>\n{}\n</system>", text));
         }
     }
 
-    if text_parts.is_empty() {
+    // Tool declarations.
+    if let Some(tools) = &request.tools {
+        let decls: Vec<String> = tools
+            .iter()
+            .flat_map(|t| t.function_declarations.iter())
+            .map(|d| {
+                let params = d
+                    .parameters
+                    .as_ref()
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                format!(
+                    "<tool name=\"{}\" description=\"{}\">\n{}\n</tool>",
+                    d.name,
+                    d.description.as_deref().unwrap_or(""),
+                    params
+                )
+            })
+            .collect();
+        if !decls.is_empty() {
+            sections.push(format!(
+                "<tools>\n{}\n</tools>",
+                decls.join("\n")
+            ));
+        }
+    }
+
+    // Multi-turn history and current user turn.
+    if request.contents.len() > 1 {
+        // Include history only when there are prior turns.
+        let history: Vec<String> = request
+            .contents
+            .iter()
+            .map(|c| {
+                let role_marker = match c.role.as_str() {
+                    "user" => "user",
+                    "model" => "assistant",
+                    _ => c.role.as_str(),
+                };
+                let text = c
+                    .parts
+                    .iter()
+                    .map(|p| match p {
+                        Part::Text(t) => t.text.clone(),
+                        Part::InlineData(_) => "[inline data]".to_string(),
+                        Part::FunctionCall(fc) => format!(
+                            "<function_call name=\"{}\">{}</function_call>",
+                            fc.function_call.name,
+                            fc.function_call.args
+                        ),
+                        Part::FunctionResponse(fr) => format!(
+                            "<function_response name=\"{}\">{}</function_response>",
+                            fr.function_response.name,
+                            fr.function_response.response
+                        ),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+                format!("<{}>{}</{}>", role_marker, text, role_marker)
+            })
+            .collect();
+        sections.push(history.join("\n"));
+    } else if let Some(first) = request.contents.first() {
+        // Single turn: just append the text directly.
+        let text = first
+            .parts
+            .iter()
+            .map(|p| match p {
+                Part::Text(t) => t.text.clone(),
+                Part::InlineData(_) => "[inline data]".to_string(),
+                Part::FunctionCall(fc) => format!(
+                    "<function_call name=\"{}\">{}</function_call>",
+                    fc.function_call.name,
+                    fc.function_call.args
+                ),
+                Part::FunctionResponse(fr) => format!(
+                    "<function_response name=\"{}\">{}</function_response>",
+                    fr.function_response.name,
+                    fr.function_response.response
+                ),
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        if !text.is_empty() {
+            sections.push(text);
+        }
+    }
+
+    // Thinking hint.
+    if let Some(config) = request.generation_config.as_ref()
+        && config.thinking_config.is_some()
+    {
+        sections.push(
+            "<thinking>Please show your step-by-step reasoning before answering.</thinking>"
+                .to_string(),
+        );
+    }
+
+    if sections.is_empty() {
         return "Hello".to_string();
     }
-
-    text_parts.join("\n")
-}
-
-fn extract_system_instruction(request: &crate::gemini::types::GenerateContentRequest) -> Option<String> {
-    request.system_instruction.as_ref().and_then(|sys| {
-        sys.parts.iter().filter_map(|part| {
-            if let crate::gemini::types::Part::Text(t) = part {
-                Some(t.text.clone())
-            } else {
-                None
-            }
-        }).next()
-    })
-}
-
-/// Merge the system instruction into the user prompt text.
-///
-/// Live Gemini rejects the separate system-instruction slot (slot 33) in the
-/// current 97-slot payload, returning HTTP 400. Until the correct slot encoding
-/// is known, prepend the system instruction to the first user message so the
-/// model still sees the behavior guidance.
-fn merge_system_into_prompt(
-    request: &crate::gemini::types::GenerateContentRequest,
-) -> crate::gemini::types::GenerateContentRequest {
-    let mut request = request.clone();
-    if let Some(sys) = extract_system_instruction(&request)
-        && !sys.is_empty()
-    {
-        for content in &mut request.contents {
-            if content.role == "user" {
-                let mut joined = sys.clone();
-                joined.push('\n');
-                for part in &content.parts {
-                    if let crate::gemini::types::Part::Text(t) = part {
-                        joined.push_str(&t.text);
-                    }
-                }
-                content.parts = vec![crate::gemini::types::Part::Text(
-                    crate::gemini::types::TextPart { text: joined },
-                )];
-                break;
-            }
-        }
-        request.system_instruction = None;
-    }
-    request
+    sections.join("\n\n")
 }
 
 /// Build the side channel header (12-element array) with mode ID

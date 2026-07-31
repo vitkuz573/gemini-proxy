@@ -146,10 +146,16 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
                     };
 
                     let mut chunk_text = String::new();
+                    let mut chunk_thinking = String::new();
+                    let mut chunk_tool_use: Vec<(String, serde_json::Value)> = Vec::new();
                     if let Some(ref content) = candidate.content {
                         for part in &content.parts {
-                            if let ResponsePart::Text(tp) = part {
-                                chunk_text.push_str(&tp.text);
+                            match part {
+                                ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
+                                ResponsePart::Thought(tp) => chunk_thinking.push_str(&tp.text),
+                                ResponsePart::FunctionCall(fc) => {
+                                    chunk_tool_use.push((fc.function_call.name.clone(), fc.function_call.args.clone()));
+                                }
                             }
                         }
                     }
@@ -209,6 +215,37 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
                         });
                         if let Ok(s) = serde_json::to_string(&delta_event) {
                             let _ = tx.send(Ok(format!("event: content_block_delta\ndata: {s}\n\n"))).await;
+                        }
+                    }
+
+                    if !chunk_thinking.is_empty() {
+                        let delta_event = json!({
+                            "type": "content_block_delta",
+                            "index": content_block_index,
+                            "delta": {
+                                "type": "thinking_delta",
+                                "thinking": chunk_thinking
+                            }
+                        });
+                        if let Ok(s) = serde_json::to_string(&delta_event) {
+                            let _ = tx.send(Ok(format!("event: content_block_delta\ndata: {s}\n\n"))).await;
+                        }
+                    }
+
+                    if !chunk_tool_use.is_empty() {
+                        for (name, input) in chunk_tool_use {
+                            let tool_event = json!({
+                                "type": "content_block_delta",
+                                "index": content_block_index,
+                                "delta": {
+                                    "type": "tool_use_delta",
+                                    "name": name,
+                                    "input": input
+                                }
+                            });
+                            if let Ok(s) = serde_json::to_string(&tool_event) {
+                                let _ = tx.send(Ok(format!("event: content_block_delta\ndata: {s}\n\n"))).await;
+                            }
                         }
                     }
 

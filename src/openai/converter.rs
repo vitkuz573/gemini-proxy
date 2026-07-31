@@ -296,7 +296,15 @@ pub fn gemini_to_openai_response(
                     let existing = content.unwrap_or_default();
                     content = Some(format!("{}{}", existing, text_part.text));
                 }
-                ResponsePart::Thought(_) => {}
+                ResponsePart::Thought(thought_part) => {
+                    // OpenAI has no native reasoning field; surface thoughts
+                    // inside a <thinking> block so clients can see them.
+                    let existing = content.unwrap_or_default();
+                    content = Some(format!(
+                        "{}<thinking>{}</thinking>",
+                        existing, thought_part.text
+                    ));
+                }
                 ResponsePart::FunctionCall(fc) => {
                     let args_str = serde_json::to_string(&fc.function_call.args)
                         .unwrap_or_else(|_| "{}".into());
@@ -365,7 +373,13 @@ pub fn gemini_chunk_to_openai_chunk(
                     let existing = content.unwrap_or_default();
                     content = Some(format!("{}{}", existing, text_part.text));
                 }
-                crate::gemini::types::ResponsePart::Thought(_) => {}
+                crate::gemini::types::ResponsePart::Thought(thought_part) => {
+                    let existing = content.unwrap_or_default();
+                    content = Some(format!(
+                        "{}<thinking>{}</thinking>",
+                        existing, thought_part.text
+                    ));
+                }
                 crate::gemini::types::ResponsePart::FunctionCall(fc) => {
                     let args_str = serde_json::to_string(&fc.function_call.args)
                         .unwrap_or_else(|_| "{}".into());

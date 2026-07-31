@@ -271,16 +271,10 @@ pub fn gemini_to_anthropic_response(
                     }
                 }
                 ResponsePart::Thought(thought_part) => {
-                    if thought_part.thought {
-                        content_blocks.push(ContentBlock::Thinking {
-                            thinking: thought_part.text,
-                            signature: None,
-                        });
-                    } else {
-                        content_blocks.push(ContentBlock::Text {
-                            text: thought_part.text,
-                        });
-                    }
+                    content_blocks.push(ContentBlock::Thinking {
+                        thinking: thought_part.text,
+                        signature: None,
+                    });
                 }
                 ResponsePart::FunctionCall(fc) => {
                     content_blocks.push(ContentBlock::ToolUse {
