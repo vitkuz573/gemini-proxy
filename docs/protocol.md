@@ -185,11 +185,103 @@ contain inline reasoning rather than separate thinking blocks. There is no known
 frontend field to force a thinking-style response beyond selecting the Pro/Auto
 category.
 
+## Stateful multi-turn
+
+By default every request to `/v1/chat/completions` or `/v1/messages` in
+cookie-auth mode is treated as a single-turn request: the proxy flattens the
+full message history into the prompt text and sends `inner_req_list[2]` empty
+with slot 17 set to `[[0]]`.
+
+True stateful continuation is supported when the `browser-attestation` feature
+is enabled and a Chrome/Chromium executable is configured via `GEMINI_HEADLESS_BROWSER`
+or `CHROME_PATH`.  In that mode the proxy:
+
+1. Extracts `conversation_id`, `response_id`, `response_part_id`, and the
+   continuation token from each StreamGenerate response.
+2. Replays those values into slot 2 of the next request and sets slot 17 to
+   `[[1]]`.
+3. Uses a headless Chromium instance to produce a legitimate StreamGenerate
+   payload for the current turn, then replays it to Gemini.
+
+### Slot usage
+
+| Slot | Field | Meaning |
+|------|-------|---------|
+| 0  | 1  | Current user text (flattened prompt). |
+| 1  | 2  | Locale, e.g. `["en"]`. |
+| 2  | 3  | Conversation state: `[conversation_id, response_id, response_part_id, null, ..., continuation_token]`. |
+| 3  | 4  | Browser-attestation token (`Ijb`). Empty when browser path is disabled. |
+| 4  | 5  | Browser-attestation UUID (`Jjb`). Empty when browser path is disabled. |
+| 17 | 18 | Turn counter: `[[0]]` for first turn, `[[1]]` for follow-ups. |
+| 30 | 31 | Mode category enum from the model picker. |
+| 59 | 60 | Client request UUID. |
+
+### Continuation token
+
+After a successful StreamGenerate turn the response contains a small meta entry:
+
+```json
+["wrb.fr", null, "[null,[null,\"r_...\"],{\"26\":\"AwAAAA...\"}]"]
+```
+
+The value of object key `"26"` is the continuation token.  The proxy stores it
+in `WebConversationState::continuation_token` and places it at index `9` of the
+10-element slot 2 array for the next turn.
+
+### Headless-browser attestation
+
+The browser integration lives in `src/gemini/browser_attestation.rs` and is
+gated by the Cargo feature `browser-attestation`.  It uses raw Chrome DevTools
+Protocol (CDP) over a local WebSocket, so the only extra dependency is
+`tokio-tungstenite`.
+
+At runtime the browser is enabled only when one of these environment variables
+is set:
+
+- `GEMINI_HEADLESS_BROWSER=/usr/bin/chromium`
+- `CHROME_PATH=/usr/bin/google-chrome-stable`
+
+If neither is set the proxy falls back to the flattened-prompt path even when
+the feature is compiled in.
+
+`BrowserAttestationClient` performs the following steps for each turn:
+
+1. Launch Chrome with `--remote-debugging-port=0` and read the DevTools
+   WebSocket URL from stderr.
+2. Connect via CDP, enable `Runtime`, `Network`, and `Page` domains.
+3. Navigate to `https://gemini.google.com/app?hl=en`.
+4. Inject the cookies from `GEMINI_COOKIES` using `Network.setCookie`.
+5. Simulate the user typing the current prompt and pressing Enter by executing
+   the JS snippet in `src/gemini/browser_attestation_simulate.js`.
+6. Wait for a `Network.requestWillBeSent` event whose URL contains
+   `StreamGenerate`.
+7. Call `Network.getRequestPostData` to read the form body, parse `f.req`, and
+   return the 97-slot `inner_req_list`.
+
+The proxy then uses that array as the base for its own request, overriding only
+slot 0 (prompt), slot 30 (category enum), and slot 59 (fresh UUID).  Because
+the payload came from a real browser, slots 2/3/4/17 already contain valid
+state and attestation tokens.
+
+### Caching and invalidation
+
+The browser client keeps a single Chrome process and page alive for the
+lifetime of the `WebFrontendClient`.  If a request returns HTTP 400 or an error
+containing code `1096` (attestation/state invalid), the proxy clears the cached
+`WebConversationState`, which forces the next turn to start a fresh
+conversation.
+
 ## Implementation pointers
 
 - `src/gemini/web_frontend.rs` — `WebFrontendClient::list_models`,
-  `parse_user_status_model_list`, `build_inner_req_list`, and
-  `extract_snlim0e`.
-- `src/gemini/client.rs` — `GeminiClient::list_models_via_web` and
-  `resolve_web_model` wire the dynamic list into the public API.
-- `src/openai/server.rs` — `/v1/models` and `/v1/chat/completions` handlers.
+  `parse_user_status_model_list`, `build_inner_req_list`,
+  `extract_conversation_state`, and `WebConversationState`.
+- `src/gemini/browser_attestation.rs` — `BrowserAttestationClient` and the CDP
+  driver used to capture real StreamGenerate payloads.
+- `src/gemini/browser_attestation_simulate.js` — JS injected into the headless
+  page to trigger a StreamGenerate request.
+- `src/gemini/client.rs` — `GeminiClient::list_models_via_web`,
+  `resolve_web_model`, and `update_conversation_state_from_body`.
+- `src/openai/server.rs` — `/v1/models`, `/v1/chat/completions`, and streaming
+  response handling.
+- `src/config.rs` — reads `GEMINI_HEADLESS_BROWSER` / `CHROME_PATH`.

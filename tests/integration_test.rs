@@ -20,6 +20,8 @@ fn make_config() -> Config {
         max_retries: 2,
         rate_limit: 60,
         cors_origins: vec!["*".to_string()],
+        gemini_headless_browser: None,
+        chrome_path: None,
     }
 }
 

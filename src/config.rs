@@ -13,6 +13,12 @@ pub struct Config {
     pub max_retries: u32,
     pub rate_limit: u64,
     pub cors_origins: Vec<String>,
+    /// Optional path to a Chrome/Chromium executable used to obtain legitimate
+    /// StreamGenerate attestation payloads in cookie-auth mode.
+    pub gemini_headless_browser: Option<String>,
+    /// Alias for `gemini_headless_browser`.  If both are set,
+    /// `GEMINI_HEADLESS_BROWSER` wins.
+    pub chrome_path: Option<String>,
 }
 
 impl Config {
@@ -50,6 +56,13 @@ impl Config {
             .map(|s| s.trim().to_string())
             .collect();
 
+        let gemini_headless_browser = env::var("GEMINI_HEADLESS_BROWSER")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let chrome_path = env::var("CHROME_PATH")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         Ok(Config {
             listen_addr,
             gemini_base_url,
@@ -59,7 +72,17 @@ impl Config {
             max_retries,
             rate_limit,
             cors_origins,
+            gemini_headless_browser,
+            chrome_path,
         })
+    }
+
+    /// Effective Chrome/Chromium executable path.  Returns `GEMINI_HEADLESS_BROWSER`
+    /// if set, otherwise `CHROME_PATH`.
+    pub fn browser_path(&self) -> Option<&str> {
+        self.gemini_headless_browser
+            .as_deref()
+            .or(self.chrome_path.as_deref())
     }
 
     pub fn has_cookie_auth(&self) -> bool {

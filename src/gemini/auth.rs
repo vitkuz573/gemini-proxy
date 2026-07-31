@@ -74,6 +74,8 @@ mod tests {
             max_retries: 2,
             rate_limit: 60,
             cors_origins: vec!["*".to_string()],
+            gemini_headless_browser: None,
+            chrome_path: None,
         };
         let result = GeminiAuth::from_config(&config);
         assert!(result.is_err());

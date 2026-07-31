@@ -22,6 +22,14 @@ pub struct GeminiClient {
 
 impl GeminiClient {
     pub fn new(auth: GeminiAuth, base_url: String) -> Result<Self> {
+        Self::new_with_browser_path(auth, base_url, None)
+    }
+
+    pub fn new_with_browser_path(
+        auth: GeminiAuth,
+        base_url: String,
+        browser_path: Option<String>,
+    ) -> Result<Self> {
         let client = Client::builder()
             .pool_max_idle_per_host(20)
             .connect_timeout(std::time::Duration::from_secs(10))
@@ -29,11 +37,17 @@ impl GeminiClient {
             .build()
             .map_err(|e| ProxyError::Config(format!("Failed to build HTTP client: {e}")))?;
 
+        let web_session = if auth.is_cookie_auth() {
+            Some(super::web_frontend::WebSession::new(browser_path))
+        } else {
+            None
+        };
+
         Ok(GeminiClient {
             client,
             auth,
             base_url,
-            web_session: Arc::new(Mutex::new(None)),
+            web_session: Arc::new(Mutex::new(web_session)),
             web_models: Arc::new(Mutex::new(None)),
         })
     }
@@ -90,13 +104,16 @@ impl GeminiClient {
     async fn list_models_via_web(&self) -> Result<ModelListResponse> {
         use super::web_frontend::WebFrontendClient;
 
-        let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
-        {
+        let mut web_client = {
             let session_guard = self.web_session.lock().await;
             if let Some(ref session) = *session_guard {
-                web_client.set_session(session.clone());
+                let mut client = WebFrontendClient::from_session(session.clone());
+                client.refresh_browser_if_needed().await?;
+                client
+            } else {
+                WebFrontendClient::new_with_browser_path(self.auth.cookies.clone(), None)?
             }
-        }
+        };
 
         let web_models = web_client.list_models().await?;
 
@@ -189,13 +206,16 @@ impl GeminiClient {
 
         let (mode_id, category_enum) = self.resolve_web_model(model).await?;
 
-        let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
-        {
+        let mut web_client = {
             let session_guard = self.web_session.lock().await;
             if let Some(ref session) = *session_guard {
-                web_client.set_session(session.clone());
+                let mut client = WebFrontendClient::from_session(session.clone());
+                client.refresh_browser_if_needed().await?;
+                client
+            } else {
+                WebFrontendClient::new_with_browser_path(self.auth.cookies.clone(), None)?
             }
-        }
+        };
 
         let response_text = web_client.generate_content(&mode_id, category_enum, request).await?;
 
@@ -233,19 +253,35 @@ impl GeminiClient {
 
         let (mode_id, category_enum) = self.resolve_web_model(model).await?;
 
-        let mut web_client = WebFrontendClient::new(self.auth.cookies.clone())?;
-        {
+        let mut web_client = {
             let session_guard = self.web_session.lock().await;
             if let Some(ref session) = *session_guard {
-                web_client.set_session(session.clone());
+                let mut client = WebFrontendClient::from_session(session.clone());
+                client.refresh_browser_if_needed().await?;
+                client
+            } else {
+                WebFrontendClient::new_with_browser_path(self.auth.cookies.clone(), None)?
             }
-        }
+        };
         let response = web_client.stream_generate(&mode_id, category_enum, request).await?;
         {
             let mut session_guard = self.web_session.lock().await;
             *session_guard = Some(web_client.session().clone());
         }
         Ok(response)
+    }
+
+    /// Update the shared web session conversation state from a fully consumed
+    /// response body.  Called by streaming endpoints after the upstream body has
+    /// been read to completion.
+    pub async fn update_conversation_state_from_body(&self, body: &str) {
+        if let Some(state) = super::web_frontend::extract_conversation_state(body) {
+            let mut guard = self.web_session.lock().await;
+            if let Some(ref mut session) = *guard {
+                debug!(?state, "Updating conversation state from streamed response");
+                session.conversation_state = Some(state);
+            }
+        }
     }
 
     async fn generate_content_via_api(
@@ -335,7 +371,12 @@ mod tests {
             cookies,
             api_key: None,
         };
-        GeminiClient::new(auth, "https://generativelanguage.googleapis.com".into()).unwrap()
+        GeminiClient::new_with_browser_path(
+            auth,
+            "https://generativelanguage.googleapis.com".into(),
+            None,
+        )
+        .unwrap()
     }
 
     #[test]

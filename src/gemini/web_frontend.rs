@@ -2,13 +2,53 @@ use std::collections::HashMap;
 
 use reqwest::Client;
 use serde_json::{json, Value};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::error::{ProxyError, Result};
 
 const WEB_BASE_URL: &str = "https://gemini.google.com";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
+
+/// Conversation state extracted from a StreamGenerate response and replayed into
+/// the next request's inner_req_list[2] (field 3).
+///
+/// Live browser captures show the 10-element format:
+///   [conversationId, responseId, responsePartId, null, null, null, null, null, null, continuationToken]
+///
+/// - `conversation_id` (`c_...`) is returned in the main response payload at index [1][0].
+/// - `response_id` (`r_...`) is returned at main response [1][1] and in the meta entry [1][1].
+/// - `response_part_id` (`rc_...`) is the first element of the response part array (main [4][0][0]).
+/// - `continuation_token` comes from the small meta response entry at object key `"26"`.
+#[derive(Debug, Clone)]
+pub struct BrowserAttestationPayload {
+    pub inner_req_list: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct WebConversationState {
+    pub conversation_id: String,
+    pub response_id: String,
+    pub response_part_id: String,
+    pub continuation_token: String,
+}
+
+impl WebConversationState {
+    fn to_inner_meta(&self) -> Value {
+        json!([
+            self.conversation_id,
+            self.response_id,
+            self.response_part_id,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            self.continuation_token,
+        ])
+    }
+}
 
 
 
@@ -61,38 +101,194 @@ pub struct WebSession {
     pub build_label: Option<String>,
     pub session_id: Option<String>,
     pub language: String,
+    /// Multi-turn conversation state carried across StreamGenerate calls.
+    pub conversation_state: Option<WebConversationState>,
+    /// Cookies used by this session so the session is self-contained when
+    /// restored from the shared `GeminiClient` cache.
+    pub cookies: HashMap<String, String>,
+    /// Path to the Chrome/Chromium executable used for browser attestation.
+    pub browser_path: Option<String>,
 }
 
 impl Default for WebSession {
     fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl WebSession {
+    pub fn new(browser_path: Option<String>) -> Self {
         Self {
             access_token: None,
             build_label: None,
             session_id: None,
             language: "en".to_string(),
+            conversation_state: None,
+            cookies: HashMap::new(),
+            browser_path,
         }
     }
+}
+
+/// Placeholder type used internally so the browser-payload parameter has a
+/// stable name regardless of whether the `browser-attestation` feature is
+/// enabled.  When the feature is off the only variant that exists is
+/// `Disabled`; when the feature is on the `Feature` variant carries the real
+/// captured payload.
+#[derive(Debug, Clone)]
+pub enum BrowserPayloadPlaceholder {
+    #[cfg(feature = "browser-attestation")]
+    Feature(super::browser_attestation::BrowserAttestationPayload),
+    #[cfg(not(feature = "browser-attestation"))]
+    Disabled,
 }
 
 pub struct WebFrontendClient {
     client: Client,
     cookies: HashMap<String, String>,
     session: WebSession,
+    #[cfg(feature = "browser-attestation")]
+    browser_client: Option<super::browser_attestation::BrowserAttestationClient>,
 }
 
 impl WebFrontendClient {
-    pub fn new(cookies: HashMap<String, String>) -> Result<Self> {
+    pub fn new(cookies: HashMap<String, String>, browser_path: Option<String>) -> Result<Self> {
         let client = Client::builder()
             .pool_max_idle_per_host(20)
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .map_err(|e| ProxyError::Config(format!("Failed to build HTTP client: {e}")))?;
 
+        #[cfg(feature = "browser-attestation")]
+        let browser_client = browser_path.clone().map(super::browser_attestation::BrowserAttestationClient::new);
+
+        let mut session = WebSession::new(browser_path);
+        session.cookies = cookies.clone();
+
         Ok(Self {
             client,
             cookies,
-            session: WebSession::default(),
+            session,
+            #[cfg(feature = "browser-attestation")]
+            browser_client,
         })
+    }
+
+    /// Reconstruct a client from a cached session.  The browser path is taken
+    /// from the session object; the caller should invoke
+    /// `refresh_browser_if_needed` if the session was just loaded from cache.
+    pub fn from_session(session: WebSession) -> Self {
+        let cookies = session.cookies.clone();
+        #[cfg(feature = "browser-attestation")]
+        let browser_client = session.browser_path.as_ref().map(|p| {
+            super::browser_attestation::BrowserAttestationClient::new(p.clone())
+        });
+        Self {
+            client: Client::builder()
+                .pool_max_idle_per_host(20)
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("HTTP client must build"),
+            cookies,
+            session,
+            #[cfg(feature = "browser-attestation")]
+            browser_client,
+        }
+    }
+
+    /// Create a client that uses the configured browser path and supplied
+    /// cookies.  Kept for callers that do not have a cached session.
+    pub fn new_with_browser_path(cookies: HashMap<String, String>, browser_path: Option<String>) -> Result<Self> {
+        Self::new_with_session(cookies, WebSession::new(browser_path))
+    }
+
+    fn new_with_session(cookies: HashMap<String, String>, session: WebSession) -> Result<Self> {
+        let client = Client::builder()
+            .pool_max_idle_per_host(20)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| ProxyError::Config(format!("Failed to build HTTP client: {e}")))?;
+
+        #[cfg(feature = "browser-attestation")]
+        let browser_client = session.browser_path.as_ref().map(|p| {
+            super::browser_attestation::BrowserAttestationClient::new(p.clone())
+        });
+
+        Ok(Self {
+            client,
+            cookies,
+            session,
+            #[cfg(feature = "browser-attestation")]
+            browser_client,
+        })
+    }
+
+    /// If the session carries a browser path but no live browser client has
+    /// been attached yet, create one.  This is used when restoring a session
+    /// from the shared `GeminiClient` cache.
+    #[cfg(feature = "browser-attestation")]
+    pub async fn refresh_browser_if_needed(&mut self) -> Result<()> {
+        if self.browser_client.is_none() && self.session.browser_path.is_some() {
+            self.browser_client = self
+                .session
+                .browser_path
+                .as_ref()
+                .map(|p| super::browser_attestation::BrowserAttestationClient::new(p.clone()));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "browser-attestation"))]
+    pub async fn refresh_browser_if_needed(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Close the browser process if one was started.
+    #[cfg(feature = "browser-attestation")]
+    pub async fn close_browser(&mut self) {
+        if let Some(ref mut browser) = self.browser_client {
+            browser.close().await;
+        }
+    }
+
+    #[cfg(not(feature = "browser-attestation"))]
+    pub async fn close_browser(&mut self) {}
+
+    /// Try to obtain a fresh StreamGenerate payload from the headless browser.
+    /// Returns `None` when browser support is disabled, not configured, or the
+    /// browser interaction fails.
+    #[cfg(feature = "browser-attestation")]
+    async fn get_browser_payload(
+        &mut self,
+        prompt: &str,
+    ) -> Option<BrowserPayloadPlaceholder> {
+        let browser = self.browser_client.as_ref()?;
+        let conversation_id = self
+            .session
+            .conversation_state
+            .as_ref()
+            .map(|s| s.conversation_id.as_str());
+        match browser
+            .get_stream_generate_payload(&self.cookies, prompt, conversation_id)
+            .await
+        {
+            Ok(payload) => {
+                debug!("Browser attestation payload acquired");
+                Some(BrowserPayloadPlaceholder::Feature(payload))
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to obtain browser attestation payload; falling back");
+                None
+            }
+        }
+    }
+
+    #[cfg(not(feature = "browser-attestation"))]
+    async fn get_browser_payload(
+        &mut self,
+        _prompt: &str,
+    ) -> Option<BrowserPayloadPlaceholder> {
+        None
     }
 
     pub fn build_cookie_header(&self) -> String {
@@ -196,38 +392,46 @@ impl WebFrontendClient {
             ((ts % 900_000) + 100_000).to_string()
         };
 
+        let language = self.session.language.clone();
+        let build_label = self.session.build_label.clone();
+        let session_id = self.session.session_id.clone();
+        let access_token = self.session.access_token.clone();
+
         let mut params = vec![
-            ("hl", self.session.language.as_str()),
+            ("hl", language.as_str()),
             ("_reqid", reqid.as_str()),
             ("rt", "c"),
             ("pageId", "none"),
         ];
 
-        if let Some(ref bl) = self.session.build_label {
+        if let Some(ref bl) = build_label {
             params.push(("bl", bl.as_str()));
         }
-        if let Some(ref sid) = self.session.session_id {
+        if let Some(ref sid) = session_id {
             params.push(("f.sid", sid.as_str()));
         }
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let inner_req_list = build_inner_req_list(request, category_enum);
-        let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
-        let f_req = json!([null, inner_json]);
-        let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
-
-        let _side_channel = build_side_channel_header(mode_id);
-
-        let at = self.session.access_token.as_deref().unwrap_or("");
-        let form_data = [format!("f.req={}", urlencoding::encode(&f_req_str)),
-            format!("at={}", urlencoding::encode(at))];
-
-        let body = form_data.join("&");
+        let prompt = serialize_request_to_prompt(request);
+        let browser_payload = self.get_browser_payload(&prompt).await;
+        let browser_payload_ref = browser_payload.as_ref().map(|p| match p {
+            #[cfg(feature = "browser-attestation")]
+            BrowserPayloadPlaceholder::Feature(payload) => payload,
+            #[cfg(not(feature = "browser-attestation"))]
+            BrowserPayloadPlaceholder::Disabled => unreachable!(),
+        });
+        let (inner_req_list, used_browser) = build_inner_req_list(
+            request,
+            category_enum,
+            self.session.conversation_state.as_ref(),
+            browser_payload_ref,
+        );
+        let body = build_stream_generate_body(&inner_req_list, access_token.as_deref().unwrap_or(""));
 
         let headers = self.build_headers();
 
-        debug!(mode_id, category_enum, "Sending request to web frontend");
+        debug!(mode_id, category_enum, used_browser, "Sending request to web frontend");
 
         let mut req = self.client.post(&url)
             .query(&params)
@@ -246,10 +450,17 @@ impl WebFrontendClient {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            error!(status = %status, body = %body, "Web frontend error");
+            let err_body = response.text().await.unwrap_or_default();
+            error!(status = %status, body = %err_body, "Web frontend error");
+            // 1096 / attestation errors invalidate cached browser state.
+            if is_attestation_error(&err_body) {
+                self.session.conversation_state = None;
+                if used_browser {
+                    warn!("Attestation rejected (1096); clearing conversation state");
+                }
+            }
             return Err(ProxyError::GeminiApi(format!(
-                "HTTP {status}: {body}"
+                "HTTP {status}: {err_body}"
             )));
         }
 
@@ -259,6 +470,13 @@ impl WebFrontendClient {
             .map_err(|e| ProxyError::GeminiApi(format!("Failed to read response: {e}")))?;
 
         debug!(body_len = body.len(), "Response from Gemini");
+
+        // Extract conversation state for the next turn.  Even if this fails we
+        // still return the body so the current response can be parsed.
+        if let Some(state) = extract_conversation_state(&body) {
+            debug!(?state, "extracted conversation state");
+            self.session.conversation_state = Some(state);
+        }
 
         // Return the raw response body so callers can parse structured parts
         // (text, thought, functionCall) using parse_response_parts.
@@ -283,38 +501,46 @@ impl WebFrontendClient {
             ((ts % 900_000) + 100_000).to_string()
         };
 
+        let language = self.session.language.clone();
+        let build_label = self.session.build_label.clone();
+        let session_id = self.session.session_id.clone();
+        let access_token = self.session.access_token.clone();
+
         let mut params = vec![
-            ("hl", self.session.language.as_str()),
+            ("hl", language.as_str()),
             ("_reqid", reqid.as_str()),
             ("rt", "c"),
             ("pageId", "none"),
         ];
 
-        if let Some(ref bl) = self.session.build_label {
+        if let Some(ref bl) = build_label {
             params.push(("bl", bl.as_str()));
         }
-        if let Some(ref sid) = self.session.session_id {
+        if let Some(ref sid) = session_id {
             params.push(("f.sid", sid.as_str()));
         }
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let inner_req_list = build_inner_req_list(request, category_enum);
-        let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
-        let f_req = json!([null, inner_json]);
-        let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
-
-        let _side_channel = build_side_channel_header(mode_id);
-
-        let at = self.session.access_token.as_deref().unwrap_or("");
-        let form_data = [format!("f.req={}", urlencoding::encode(&f_req_str)),
-            format!("at={}", urlencoding::encode(at))];
-
-        let body = form_data.join("&");
+        let prompt = serialize_request_to_prompt(request);
+        let browser_payload = self.get_browser_payload(&prompt).await;
+        let browser_payload_ref = browser_payload.as_ref().map(|p| match p {
+            #[cfg(feature = "browser-attestation")]
+            BrowserPayloadPlaceholder::Feature(payload) => payload,
+            #[cfg(not(feature = "browser-attestation"))]
+            BrowserPayloadPlaceholder::Disabled => unreachable!(),
+        });
+        let (inner_req_list, used_browser) = build_inner_req_list(
+            request,
+            category_enum,
+            self.session.conversation_state.as_ref(),
+            browser_payload_ref,
+        );
+        let body = build_stream_generate_body(&inner_req_list, access_token.as_deref().unwrap_or(""));
 
         let headers = self.build_headers();
 
-        debug!(mode_id, category_enum, "Sending streaming request to web frontend");
+        debug!(mode_id, category_enum, used_browser, "Sending streaming request to web frontend");
 
         let mut req = self.client.post(&url)
             .query(&params)
@@ -333,12 +559,22 @@ impl WebFrontendClient {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            error!(status = %status, body = %body, "Web frontend streaming error");
+            let err_body = response.text().await.unwrap_or_default();
+            error!(status = %status, body = %err_body, "Web frontend streaming error");
+            if is_attestation_error(&err_body) {
+                self.session.conversation_state = None;
+                if used_browser {
+                    warn!("Attestation rejected (1096); clearing conversation state");
+                }
+            }
             return Err(ProxyError::GeminiApi(format!(
-                "HTTP {status}: {body}"
+                "HTTP {status}: {err_body}"
             )));
         }
+
+        // For streaming we cannot read the body here; callers are responsible
+        // for consuming the stream.  Conversation state extraction is therefore
+        // left to the caller via `extract_conversation_state`.
 
         Ok(response)
     }
@@ -352,7 +588,14 @@ impl WebFrontendClient {
     }
 
     pub async fn close(&mut self) {
+        self.close_browser().await;
         self.session = WebSession::default();
+    }
+
+    /// Returns true if the request should be considered a new conversation.
+    /// Used to decide whether to start a fresh browser page context.
+    pub fn is_new_conversation(&self) -> bool {
+        self.session.conversation_state.is_none()
     }
 
     /// Discover the models available to this account via the web frontend model picker.
@@ -602,11 +845,12 @@ fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
 /// `assistant.lamda.BardFrontendService/StreamGenerate` captures:
 /// - slot 0  -> field 1  -> current user text (JN submessage)
 /// - slot 1  -> field 2  -> locale ("en")
-/// - slot 2  -> field 3  -> conversation metadata
+/// - slot 2  -> field 3  -> conversation metadata (10-element array)
 /// - slot 3  -> field 4  -> Web Attestation token (Ijb) - optional/empty
 /// - slot 4  -> field 5  -> attestation uuid (Jjb) - optional/empty
+/// - slot 17 -> field 18 -> turn counter ([[0]] first turn, [[1]] subsequent)
 /// - slot 30 -> field 31 -> mode category enum
-/// - slot 33 -> field 34 -> system instruction (AE submessage)
+/// - slot 33 -> field 34  -> system instruction (AE submessage)
 /// - slot 53 -> field 54 -> unknown boolean
 /// - slot 59 -> field 60 -> client request uuid
 /// - slot 61 -> field 62 -> unknown empty array
@@ -616,16 +860,22 @@ fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
 /// - slot 91 -> field 92 -> unknown int
 /// - slot 96 -> field 97 -> unknown int
 ///
-/// Because the live frontend maintains conversation state server-side (via
-/// conversationId/Iq/J2) and the 97-slot array only carries the current turn,
-/// this builder serialises the full OpenAI/Anthropic request surface into the
-/// prompt text: system/developer instructions, multi-turn history, tool
-/// declarations, and a thinking hint.  The category enum is still respected so
-/// callers can select a thinking model for reasoning requests.
+/// For multi-turn cookie-auth mode, `conversation_state` is replayed into slot
+/// 2 and slot 17 becomes [[1]].  Single-turn requests keep slot 2 empty and
+/// slot 17 [[0]].
+///
+/// If `browser_payload` is present, the proxy starts from the browser-captured
+/// 97-slot array and overrides slot 0 (prompt), slot 30 (category), and slot 59
+/// (request UUID).  This lets the browser supply valid slots 2/3/4/17 and any
+/// continuation tokens it generated.  When the browser payload is absent we
+/// fall back to the flattened-prompt path (slot 2 empty, slots 3/4 empty).
+#[cfg(feature = "browser-attestation")]
 fn build_inner_req_list(
     request: &crate::gemini::types::GenerateContentRequest,
     category_enum: u64,
-) -> Vec<Value> {
+    conversation_state: Option<&WebConversationState>,
+    browser_payload: Option<&BrowserAttestationPayload>,
+) -> (Vec<Value>, bool) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -633,19 +883,40 @@ fn build_inner_req_list(
 
     let prompt = serialize_request_to_prompt(request);
 
-    let mut inner: Vec<Value> = vec![Value::Null; 97];
+    // If a browser payload is available, use it as the source of truth for the
+    // tricky attestation/state slots.  The caller already logged failure if the
+    // browser interaction did not succeed.
+    let mut inner = if let Some(payload) = browser_payload {
+        let mut slots = payload.inner_req_list.clone();
+        // Ensure exactly 97 slots to match the protocol.
+        match slots.len().cmp(&97) {
+            std::cmp::Ordering::Less => slots.resize(97, Value::Null),
+            std::cmp::Ordering::Greater => slots.truncate(97),
+            std::cmp::Ordering::Equal => {}
+        }
+        slots
+    } else {
+        let mut slots = vec![Value::Null; 97];
+        slots[2] = match conversation_state {
+            Some(state) => state.to_inner_meta(),
+            None => json!(["", "", "", null, null, null, null, null, null, ""]),
+        };
+        slots[3] = json!("");
+        slots[4] = json!("");
+        slots[17] = if conversation_state.is_some() {
+            json!([[1]])
+        } else {
+            json!([[0]])
+        };
+        slots
+    };
+
     inner[0] = json!([prompt, 0, null, null, null, null, 0]);
     inner[1] = json!(["en"]);
-    inner[2] = json!(["", "", "", null, null, null, null, null, null, ""]);
-    // slot 3 / field 4: web attestation token - not required to be valid.
-    inner[3] = json!("");
-    // slot 4 / field 5: attestation uuid - not required to be valid.
-    inner[4] = json!("");
     inner[6] = json!([1]);
     inner[7] = json!(1);
     inner[10] = json!(1);
     inner[11] = json!(0);
-    inner[17] = json!([[0]]);
     inner[18] = json!(0);
     inner[27] = json!(1);
     inner[30] = json!([category_enum]);
@@ -659,7 +930,72 @@ fn build_inner_req_list(
     inner[91] = json!(0);
     inner[96] = json!(0);
 
-    inner
+    (inner, browser_payload.is_some())
+}
+
+#[cfg(not(feature = "browser-attestation"))]
+fn build_inner_req_list(
+    request: &crate::gemini::types::GenerateContentRequest,
+    category_enum: u64,
+    conversation_state: Option<&WebConversationState>,
+    _browser_payload: Option<&BrowserAttestationPayload>,
+) -> (Vec<Value>, bool) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let prompt = serialize_request_to_prompt(request);
+
+    let mut inner = vec![Value::Null; 97];
+    inner[0] = json!([prompt, 0, null, null, null, null, 0]);
+    inner[1] = json!(["en"]);
+    inner[2] = match conversation_state {
+        Some(state) => state.to_inner_meta(),
+        None => json!(["", "", "", null, null, null, null, null, null, ""]),
+    };
+    inner[3] = json!("");
+    inner[4] = json!("");
+    inner[6] = json!([1]);
+    inner[7] = json!(1);
+    inner[10] = json!(1);
+    inner[11] = json!(0);
+    inner[17] = if conversation_state.is_some() {
+        json!([[1]])
+    } else {
+        json!([[0]])
+    };
+    inner[18] = json!(0);
+    inner[27] = json!(1);
+    inner[30] = json!([category_enum]);
+    inner[41] = json!([2]);
+    inner[53] = json!(0);
+    inner[59] = json!(uuid::Uuid::new_v4().to_string().to_uppercase());
+    inner[61] = json!([]);
+    inner[66] = json!([ts, 0]);
+    inner[68] = json!(1);
+    inner[79] = json!(6);
+    inner[91] = json!(0);
+    inner[96] = json!(0);
+
+    (inner, false)
+}
+
+/// Build the URL-encoded `f.req` body for StreamGenerate.
+fn build_stream_generate_body(inner_req_list: &[Value], at: &str) -> String {
+    let inner_json = serde_json::to_string(inner_req_list).unwrap_or_default();
+    let f_req = json!([null, inner_json]);
+    let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
+    let form_data = [
+        format!("f.req={}", urlencoding::encode(&f_req_str)),
+        format!("at={}", urlencoding::encode(at)),
+    ];
+    form_data.join("&")
+}
+
+/// Heuristic detection of Google attestation / invalid-state errors.
+fn is_attestation_error(body: &str) -> bool {
+    body.contains("1096") || body.contains("BardErrorInfo") || body.contains("rs:108")
 }
 
 /// Serialize a full GenerateContentRequest into a single prompt string.
@@ -794,6 +1130,7 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
 }
 
 /// Build the side channel header (12-element array) with mode ID
+#[allow(dead_code)]
 fn build_side_channel_header(mode_id: &str) -> Value {
     json!([
         1,
@@ -887,6 +1224,69 @@ fn extract_session_id(body: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Extract multi-turn conversation state from a raw StreamGenerate response.
+///
+/// The response is a length-prefixed sequence of WIZ JSON arrays.  We look for
+/// two entries:
+/// - the main response entry (`["wrb.fr", null, "[<inner array>, ...]"]`) where
+///   `inner[1]` holds `[conversation_id, response_id]` and `inner[4]` holds the
+///   response parts;
+/// - the small meta entry (`["wrb.fr", null, "[null,[null,<r_id>],{\"26\":<token>,...}]"]`) which
+///   carries the continuation token at key `"26"`.
+pub fn extract_conversation_state(body: &str) -> Option<WebConversationState> {
+    let mut main_entry: Option<Value> = None;
+    let mut continuation_token: Option<String> = None;
+
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+            continue;
+        }
+        let entry: Value = serde_json::from_str(line).ok()?;
+        let entry_arr = entry.as_array()?;
+        let rpc_id = entry_arr.first().and_then(|v| v.as_str())?;
+        if rpc_id != "wrb.fr" {
+            continue;
+        }
+        let payload_str = entry_arr.get(2).and_then(|v| v.as_str())?;
+        let payload: Value = serde_json::from_str(payload_str).ok()?;
+        let payload_arr = payload.as_array()?;
+
+        // Meta entry: 3 elements, third is an object containing "26" token.
+        if payload_arr.len() == 3 {
+            if let Some(obj) = payload_arr.get(2).and_then(|v| v.as_object())
+                && let Some(token) = obj.get("26").and_then(|v| v.as_str())
+            {
+                continuation_token = Some(token.to_string());
+            }
+            continue;
+        }
+
+        // Main entry: at least 5 elements, inner[4] is array of response parts.
+        if payload_arr.len() >= 5 && payload_arr.get(4).and_then(|v| v.as_array()).is_some() {
+            main_entry = Some(payload);
+        }
+    }
+
+    let main = main_entry?;
+    let main_arr = main.as_array()?;
+
+    let ids = main_arr.get(1).and_then(|v| v.as_array())?;
+    let conversation_id = ids.first().and_then(|v| v.as_str())?.to_string();
+    let response_id = ids.get(1).and_then(|v| v.as_str())?.to_string();
+
+    let parts = main_arr.get(4).and_then(|v| v.as_array())?;
+    let first_part = parts.first().and_then(|v| v.as_array())?;
+    let response_part_id = first_part.first().and_then(|v| v.as_str())?.to_string();
+
+    Some(WebConversationState {
+        conversation_id,
+        response_id,
+        response_part_id,
+        continuation_token: continuation_token.unwrap_or_default(),
+    })
 }
 
 /// Parse the StreamGenerate response
