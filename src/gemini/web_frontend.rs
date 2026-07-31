@@ -913,7 +913,6 @@ fn build_inner_req_list(
 
     inner[0] = json!([prompt, 0, null, null, null, null, 0]);
     inner[1] = json!(["en"]);
-    inner[6] = json!([1]);
     inner[7] = json!(1);
     inner[10] = json!(1);
     inner[11] = json!(0);
@@ -924,11 +923,20 @@ fn build_inner_req_list(
     inner[53] = json!(0);
     inner[59] = json!(uuid::Uuid::new_v4().to_string().to_uppercase());
     inner[61] = json!([]);
-    inner[66] = json!([ts, 0]);
     inner[68] = json!(1);
     inner[79] = json!(6);
     inner[91] = json!(0);
     inner[96] = json!(0);
+
+    // Live browser captures show slot 6 as [0] and slot 66 as null.  The
+    // non-browser fallback path used to hard-code [1] and [ts,0], but when we
+    // are replaying a real browser payload we must preserve the browser's own
+    // values for these attestation-sensitive slots.  Only override them when
+    // no browser payload is available.
+    if browser_payload.is_none() {
+        inner[6] = json!([1]);
+        inner[66] = json!([ts, 0]);
+    }
 
     (inner, browser_payload.is_some())
 }

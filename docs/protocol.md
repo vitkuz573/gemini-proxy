@@ -158,6 +158,59 @@ resolves the requested model to the current hex mode ID and its category:
 No legacy aliases are supported; the only stable identifiers are the human
 readable IDs returned by `/v1/models`.
 
+## Tools / function calling
+
+The proxy supports OpenAI-compatible `tools` / `function_declarations` in two
+ways depending on the authentication mode.
+
+### API-key mode
+
+When a Gemini API key is available the proxy forwards the native
+`tools`/`tool_config` fields of the
+[Generative Language API](https://ai.google.dev/api/rest/v1beta/Tools)
+directly.  This is the only path that provides true native function calling.
+
+### Cookie-auth / web-frontend mode
+
+The Gemini web frontend's `StreamGenerate` endpoint does **not** expose a field
+for arbitrary function declarations.  Reverse engineering of the live frontend
+(`BardChatUi_modules.js`) shows one related protobuf field,
+`toolMentions` (proto field 10 on `_.ON`), but it is used only for built-in
+Google extensions triggered by `@` mentions in the UI (e.g. `@Gmail`,
+`@YouTube`) or by explicit internal callers such as `audio_gen_tool`.  No slot
+in the 97-slot `inner_req_list`, and no side-channel header, carries custom
+function schemas.
+
+Because of this, the proxy falls back to **serializing tool declarations into
+the prompt text**.  The format used is XML-style markers produced by
+`serialize_request_to_prompt` in `src/gemini/web_frontend.rs`:
+
+```xml
+<system>
+...system instructions...
+</system>
+
+<tools>
+  <tool name="get_weather" description="...">
+    {"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}
+  </tool>
+</tools>
+
+<user>
+What is the weather in Paris?
+</user>
+```
+
+This fallback works when the model respects the XML markers and emits
+`<function_call>` / `<function_response>` blocks, which the proxy parses back
+into OpenAI-style `tool_calls`.  It is inherently less reliable than the native
+API-key path because it relies on prompt-level instruction following.
+
+There is currently no known way to enable native custom tool declarations for
+cookie-authenticated requests.  If Google adds such a field in the future it
+will likely appear in the `_.ON` protobuf (field 10 for tool metadata) or as a
+new side-channel header; until then, the XML fallback is the only option.
+
 ## Reasoning / thinking passthrough
 
 `reasoning_effort` (OpenAI) and `thinking` (Anthropic) are converted to Gemini's
