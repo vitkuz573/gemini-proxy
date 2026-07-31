@@ -197,23 +197,22 @@ impl GeminiClient {
             }
         }
 
-        let prompt = extract_prompt_text(request);
-
-        let response_text = web_client.generate_content(&mode_id, category_enum, &prompt).await?;
+        let response_text = web_client.generate_content(&mode_id, category_enum, request).await?;
 
         {
             let mut session_guard = self.web_session.lock().await;
             *session_guard = Some(web_client.session().clone());
         }
 
-        // Convert web frontend response to standard API response format
+        // Parse the web response into typed parts so that thoughts and function
+        // calls survive the conversion to OpenAI/Anthropic formats.
+        let parts = super::web_frontend::parse_response_parts(&response_text)?;
+
         Ok(GenerateContentResponse {
             candidates: vec![super::types::Candidate {
                 content: Some(super::types::ResponseContent {
                     role: "model".to_string(),
-                    parts: vec![super::types::ResponsePart::Text(super::types::TextResponsePart {
-                        text: response_text,
-                    })],
+                    parts,
                 }),
                 finish_reason: Some("STOP".to_string()),
                 index: 0,
@@ -241,8 +240,7 @@ impl GeminiClient {
                 web_client.set_session(session.clone());
             }
         }
-        let prompt = extract_prompt_text(request);
-        let response = web_client.stream_generate(&mode_id, category_enum, &prompt).await?;
+        let response = web_client.stream_generate(&mode_id, category_enum, request).await?;
         {
             let mut session_guard = self.web_session.lock().await;
             *session_guard = Some(web_client.session().clone());
@@ -314,38 +312,6 @@ impl GeminiClient {
             req
         }
     }
-}
-
-fn extract_prompt_text(request: &GenerateContentRequest) -> String {
-    let mut text_parts = Vec::new();
-
-    if let Some(ref system) = request.system_instruction {
-        for part in &system.parts {
-            if let super::types::Part::Text(text_part) = part {
-                text_parts.push(format!("System: {}", text_part.text));
-            }
-        }
-    }
-
-    for content in &request.contents {
-        for part in &content.parts {
-            match part {
-                super::types::Part::Text(text_part) => {
-                    text_parts.push(text_part.text.clone());
-                }
-                _ => {
-                    // For non-text parts, we'll include a placeholder
-                    text_parts.push("[non-text content]".to_string());
-                }
-            }
-        }
-    }
-
-    if text_parts.is_empty() {
-        return "Hello".to_string();
-    }
-
-    text_parts.join("\n")
 }
 
 #[cfg(test)]

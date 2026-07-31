@@ -182,7 +182,7 @@ impl WebFrontendClient {
         &mut self,
         mode_id: &str,
         category_enum: u64,
-        prompt: &str,
+        request: &crate::gemini::types::GenerateContentRequest,
     ) -> Result<String> {
         if self.session.access_token.is_none() && self.session.build_label.is_none() {
             self.init_session().await?;
@@ -212,7 +212,10 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let inner_req_list = build_inner_req_list(prompt, category_enum);
+        let merged_request = merge_system_into_prompt(request);
+        let prompt = extract_prompt_text(&merged_request);
+        let system_instruction = extract_system_instruction(&merged_request);
+        let inner_req_list = build_inner_req_list(&prompt, category_enum, system_instruction.as_deref());
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
@@ -229,17 +232,17 @@ impl WebFrontendClient {
 
         debug!(mode_id, category_enum, "Sending request to web frontend");
 
-        let mut request = self.client.post(&url)
+        let mut req = self.client.post(&url)
             .query(&params)
             .body(body);
 
         for (key, value) in &headers {
-            request = request.header(key.as_str(), value.as_str());
+            req = req.header(key.as_str(), value.as_str());
         }
 
-        request = request.header("Cookie", self.build_cookie_header());
+        req = req.header("Cookie", self.build_cookie_header());
 
-        let response = request
+        let response = req
             .send()
             .await
             .map_err(|e| ProxyError::GeminiApi(format!("Web frontend request failed: {e}")))?;
@@ -260,16 +263,16 @@ impl WebFrontendClient {
 
         debug!(body_len = body.len(), "Response from Gemini");
 
-        let text = parse_stream_response(&body)?;
-
-        Ok(text)
+        // Return the raw response body so callers can parse structured parts
+        // (text, thought, functionCall) using parse_response_parts.
+        Ok(body)
     }
 
     pub async fn stream_generate(
         &mut self,
         mode_id: &str,
         category_enum: u64,
-        prompt: &str,
+        request: &crate::gemini::types::GenerateContentRequest,
     ) -> Result<reqwest::Response> {
         if self.session.access_token.is_none() && self.session.build_label.is_none() {
             self.init_session().await?;
@@ -299,7 +302,10 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let inner_req_list = build_inner_req_list(prompt, category_enum);
+        let merged_request = merge_system_into_prompt(request);
+        let prompt = extract_prompt_text(&merged_request);
+        let system_instruction = extract_system_instruction(&merged_request);
+        let inner_req_list = build_inner_req_list(&prompt, category_enum, system_instruction.as_deref());
         let inner_json = serde_json::to_string(&inner_req_list).unwrap_or_default();
         let f_req = json!([null, inner_json]);
         let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
@@ -316,17 +322,17 @@ impl WebFrontendClient {
 
         debug!(mode_id, category_enum, "Sending streaming request to web frontend");
 
-        let mut request = self.client.post(&url)
+        let mut req = self.client.post(&url)
             .query(&params)
             .body(body);
 
         for (key, value) in &headers {
-            request = request.header(key.as_str(), value.as_str());
+            req = req.header(key.as_str(), value.as_str());
         }
 
-        request = request.header("Cookie", self.build_cookie_header());
+        req = req.header("Cookie", self.build_cookie_header());
 
-        let response = request
+        let response = req
             .send()
             .await
             .map_err(|e| ProxyError::GeminiApi(format!("Web frontend streaming request failed: {e}")))?;
@@ -596,17 +602,43 @@ fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
 
 
 
-/// Build the inner request list (69-slot array) matching browser captures
-fn build_inner_req_list(prompt: &str, category_enum: u64) -> Vec<Value> {
+/// Build the inner request list (97-slot array) matching browser captures.
+///
+/// Field-to-slot mapping (slot = field number - 1) observed from the live
+/// `assistant.lamda.BardFrontendService/StreamGenerate` captures:
+/// - slot 0  -> field 1  -> current user text (JN submessage)
+/// - slot 1  -> field 2  -> locale ("en")
+/// - slot 2  -> field 3  -> conversation metadata
+/// - slot 3  -> field 4  -> Web Attestation token (Ijb) - optional/empty
+/// - slot 4  -> field 5  -> attestation uuid (Jjb) - optional/empty
+/// - slot 30 -> field 31 -> mode category enum
+/// - slot 33 -> field 34 -> system instruction (AE submessage)
+/// - slot 53 -> field 54 -> unknown boolean
+/// - slot 59 -> field 60 -> client request uuid
+/// - slot 61 -> field 62 -> unknown empty array
+/// - slot 66 -> field 67 -> timestamp
+/// - slot 68 -> field 69 -> unknown int
+/// - slot 79 -> field 80 -> unknown int
+/// - slot 91 -> field 92 -> unknown int
+/// - slot 96 -> field 97 -> unknown int
+fn build_inner_req_list(
+    prompt: &str,
+    category_enum: u64,
+    system_instruction: Option<&str>,
+) -> Vec<Value> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
 
-    let mut inner: Vec<Value> = vec![Value::Null; 69];
+    let mut inner: Vec<Value> = vec![Value::Null; 97];
     inner[0] = json!([prompt, 0, null, null, null, null, 0]);
     inner[1] = json!(["en"]);
     inner[2] = json!(["", "", "", null, null, null, null, null, null, ""]);
+    // slot 3 / field 4: web attestation token - not required to be valid.
+    inner[3] = json!("");
+    // slot 4 / field 5: attestation uuid - not required to be valid.
+    inner[4] = json!("");
     inner[6] = json!([1]);
     inner[7] = json!(1);
     inner[10] = json!(1);
@@ -615,12 +647,89 @@ fn build_inner_req_list(prompt: &str, category_enum: u64) -> Vec<Value> {
     inner[18] = json!(0);
     inner[27] = json!(1);
     inner[30] = json!([category_enum]);
+    inner[41] = json!([2]);
     inner[53] = json!(0);
-    inner[59] = json!("CD1035A5-0E0E-4B68-B744-23C2D8960DF5");
+    inner[59] = json!(uuid::Uuid::new_v4().to_string().to_uppercase());
     inner[61] = json!([]);
     inner[66] = json!([ts, 0]);
-    inner[68] = json!(2);
+    inner[68] = json!(1);
+    inner[79] = json!(6);
+    inner[91] = json!(0);
+    inner[96] = json!(0);
+
+    if let Some(sys) = system_instruction {
+        inner[33] = json!([sys, 0, null, null, null, null, 0]);
+    }
+
     inner
+}
+
+fn extract_prompt_text(request: &crate::gemini::types::GenerateContentRequest) -> String {
+    let mut text_parts = Vec::new();
+
+    for content in &request.contents {
+        for part in &content.parts {
+            match part {
+                crate::gemini::types::Part::Text(text_part) => {
+                    text_parts.push(text_part.text.clone());
+                }
+                _ => {
+                    text_parts.push("[non-text content]".to_string());
+                }
+            }
+        }
+    }
+
+    if text_parts.is_empty() {
+        return "Hello".to_string();
+    }
+
+    text_parts.join("\n")
+}
+
+fn extract_system_instruction(request: &crate::gemini::types::GenerateContentRequest) -> Option<String> {
+    request.system_instruction.as_ref().and_then(|sys| {
+        sys.parts.iter().filter_map(|part| {
+            if let crate::gemini::types::Part::Text(t) = part {
+                Some(t.text.clone())
+            } else {
+                None
+            }
+        }).next()
+    })
+}
+
+/// Merge the system instruction into the user prompt text.
+///
+/// Live Gemini rejects the separate system-instruction slot (slot 33) in the
+/// current 97-slot payload, returning HTTP 400. Until the correct slot encoding
+/// is known, prepend the system instruction to the first user message so the
+/// model still sees the behavior guidance.
+fn merge_system_into_prompt(
+    request: &crate::gemini::types::GenerateContentRequest,
+) -> crate::gemini::types::GenerateContentRequest {
+    let mut request = request.clone();
+    if let Some(sys) = extract_system_instruction(&request)
+        && !sys.is_empty()
+    {
+        for content in &mut request.contents {
+            if content.role == "user" {
+                let mut joined = sys.clone();
+                joined.push('\n');
+                for part in &content.parts {
+                    if let crate::gemini::types::Part::Text(t) = part {
+                        joined.push_str(&t.text);
+                    }
+                }
+                content.parts = vec![crate::gemini::types::Part::Text(
+                    crate::gemini::types::TextPart { text: joined },
+                )];
+                break;
+            }
+        }
+        request.system_instruction = None;
+    }
+    request
 }
 
 /// Build the side channel header (12-element array) with mode ID
@@ -832,3 +941,211 @@ fn extract_text_from_inner_response(parsed: &Value) -> Option<String> {
 }
 
 
+pub fn parse_response_parts(body: &str) -> Result<Vec<crate::gemini::types::ResponsePart>> {
+    use crate::gemini::types::{
+        FunctionCall, FunctionCallPart, ResponsePart, TextResponsePart, ThoughtPart,
+    };
+
+    // Fast path: responses that the original text parser already handles.
+    if let Ok(text) = parse_stream_response(body) {
+        return Ok(vec![ResponsePart::Text(TextResponsePart { text })]);
+    }
+
+    let mut all_parts: Vec<ResponsePart> = Vec::new();
+
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let json_start = line.find('[').unwrap_or(0);
+        let json_line = &line[json_start..];
+        if json_line.is_empty() {
+            continue;
+        }
+        // Length-prefixed chunked responses from Gemini may have a numeric
+        // prefix before the JSON array and an extra trailing bracket. Find the
+        // first balanced top-level JSON array instead of parsing the rest.
+        let mut depth: i32 = 0;
+        let mut outer_start: Option<usize> = None;
+        let mut outer_end: Option<usize> = None;
+        for (i, c) in json_line.char_indices() {
+            if c == '[' {
+                if depth == 0 {
+                    outer_start = Some(i);
+                }
+                depth += 1;
+            } else if c == ']' {
+                depth -= 1;
+                if depth == 0 && outer_start.is_some() {
+                    outer_end = Some(i + 1);
+                    break;
+                }
+            }
+        }
+        let balanced = match (outer_start, outer_end) {
+            (Some(s), Some(e)) => &json_line[s..e],
+            _ => json_line,
+        };
+        let parsed: Value = match serde_json::from_str(balanced) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let arr = match parsed.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+        for item in arr {
+            let entry = match item.as_array() {
+                Some(e) if e.len() >= 3 => e,
+                _ => continue,
+            };
+            let rpc_id = entry[0].as_str().unwrap_or("");
+            if rpc_id != "wrb.fr" {
+                continue;
+            }
+            let json_str = match entry[2].as_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            let inner_parsed: Value = match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // StreamGenerate payload shape: the JSON string inside the
+            // wrb.fr entry is either the inner array directly (live 2026:
+            // 48 elements, inner[4] holds parts) or wrapped in a one-element
+            // array (some test fixtures and older responses). We try both.
+            let inner_arr = match inner_parsed.as_array() {
+                Some(a) => a,
+                None => continue,
+            };
+            let parts_json = if let Some(parts) = inner_arr.get(4).and_then(|v| v.as_array()) {
+                parts
+            } else if let Some(first) = inner_arr.first().and_then(|v| v.as_array()) {
+                match first.get(4).and_then(|v| v.as_array()) {
+                    Some(parts) => parts,
+                    None => continue,
+                }
+            } else {
+                continue;
+            };
+            for part in parts_json {
+                let part_arr = match part.as_array() {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let content_list = match part_arr.get(1).and_then(|v| v.as_array()) {
+                    Some(a) => a,
+                    None => continue,
+                };
+                let mut current_text: Option<String> = None;
+                for content in content_list {
+                    if let Some(s) = content.as_str() {
+                        if s.is_empty()
+                            || (s.starts_with("r_") && s.len() > 2)
+                            || (s.starts_with("c_") && s.len() > 2)
+                        {
+                            continue;
+                        }
+                        current_text = Some(match current_text {
+                            Some(prev) => format!("{}{}", prev, s),
+                            None => s.to_string(),
+                        });
+                        continue;
+                    }
+                    if let Some(prev) = current_text.take() {
+                        all_parts.push(ResponsePart::Text(TextResponsePart { text: prev }));
+                    }
+                    if let Some(obj) = content.as_object() {
+                        if let Some(fc) = obj.get("functionCall").and_then(|v| v.as_object()) {
+                            if let Some(name) = fc.get("name").and_then(|v| v.as_str()) {
+                                let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
+                                all_parts.push(ResponsePart::FunctionCall(FunctionCallPart {
+                                    function_call: FunctionCall { name: name.to_string(), args },
+                                }));
+                            }
+                            continue;
+                        }
+                        if let Some(text) = obj.get("text").and_then(|v| v.as_str()) {
+                            let is_thought =
+                                obj.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
+                            all_parts.push(ResponsePart::Thought(ThoughtPart {
+                                thought: is_thought,
+                                text: text.to_string(),
+                            }));
+                            continue;
+                        }
+                    }
+                }
+                if let Some(prev) = current_text.take() {
+                    all_parts.push(ResponsePart::Text(TextResponsePart { text: prev }));
+                }
+            }
+        }
+    }
+
+    if all_parts.is_empty() {
+        Err(ProxyError::GeminiApi(
+            "Could not parse response from Gemini web frontend".into(),
+        ))
+    } else {
+        Ok(all_parts)
+    }
+}
+
+#[cfg(test)]
+mod parse_response_parts_tests {
+    use super::parse_response_parts;
+    use crate::gemini::types::{ResponsePart, TextResponsePart};
+
+    #[test]
+    fn parses_simple_text_response() {
+        let body = r#"[["wrb.fr", null, "[[null, null, null, null, [[\"rc_123\", [\"Hello, world!\"]]]]]"]]"#;
+        let parts = parse_response_parts(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ResponsePart::Text(TextResponsePart { text }) => assert_eq!(text, "Hello, world!"),
+            _ => panic!("expected text part"),
+        }
+    }
+
+    #[test]
+    fn parses_function_call_response() {
+        let body = r#"[["wrb.fr", null, "[[null, null, null, null, [[\"rc_1\", [{\"functionCall\": {\"name\": \"get_weather\", \"args\": {\"city\": \"Paris\"}}}]]]]]"]]"#;
+        let parts = parse_response_parts(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ResponsePart::FunctionCall(fc) => {
+                assert_eq!(fc.function_call.name, "get_weather");
+                assert_eq!(fc.function_call.args["city"], "Paris");
+            }
+            _ => panic!("expected function call part"),
+        }
+    }
+
+    #[test]
+    fn parses_thought_response() {
+        let body = r#"[["wrb.fr", null, "[[null, null, null, null, [[\"rc_1\", [{\"text\": \"I should think step by step\", \"thought\": true}]]]]]"]]"#;
+        let parts = parse_response_parts(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ResponsePart::Thought(t) => {
+                assert!(t.thought);
+                assert_eq!(t.text, "I should think step by step");
+            }
+            _ => panic!("expected thought part"),
+        }
+    }
+
+    #[test]
+    fn concatenates_consecutive_text_strings() {
+        let body = r#"[["wrb.fr", null, "[[null, null, null, null, [[\"rc_1\", [\"Hello \", \"world!\"]]]]]"]]"#;
+        let parts = parse_response_parts(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ResponsePart::Text(TextResponsePart { text }) => assert_eq!(text, "Hello world!"),
+            _ => panic!("expected text part"),
+        }
+    }
+}
