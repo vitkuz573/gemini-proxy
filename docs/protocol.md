@@ -206,6 +206,10 @@ This fallback works when the model respects the XML markers and emits
 into OpenAI-style `tool_calls`.  It is inherently less reliable than the native
 API-key path because it relies on prompt-level instruction following.
 
+For best results, send a `name` field on `tool` messages so the proxy can label
+the `<function_response>` with the correct function name instead of the
+`tool_call_id`.
+
 There is currently no known way to enable native custom tool declarations for
 cookie-authenticated requests.  If Google adds such a field in the future it
 will likely appear in the `_.ON` protobuf (field 10 for tool metadata) or as a

@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use tracing::{debug, error, warn};
 
 use crate::error::{ProxyError, Result};
+use crate::gemini::types::ResponsePart;
 
 const WEB_BASE_URL: &str = "https://gemini.google.com";
 const USER_AGENT: &str =
@@ -1034,8 +1035,16 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
     }
 
     // Tool declarations.
-    if let Some(tools) = &request.tools {
-        let decls: Vec<String> = tools
+    let has_tools = request
+        .tools
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    if has_tools {
+        let decls: Vec<String> = request
+            .tools
+            .as_ref()
+            .unwrap()
             .iter()
             .flat_map(|t| t.function_declarations.iter())
             .map(|d| {
@@ -1053,8 +1062,10 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
             })
             .collect();
         if !decls.is_empty() {
+            // Insert an explicit instruction so the model knows it must emit
+            // function calls using the XML markers instead of answering inline.
             sections.push(format!(
-                "<tools>\n{}\n</tools>",
+                "<system>\nYou have access to the tools listed below. If the user's request can be answered by calling one of these tools, you MUST respond with ONLY a function call in the exact format:\n<function_call name=\"tool_name\">{{\"arg\":\"value\"}}</function_call>\nDo not add any explanatory text before or after the function call.\n</system>\n\n<tools>\n{}\n</tools>",
                 decls.join("\n")
             ));
         }
@@ -1417,7 +1428,11 @@ pub fn parse_response_parts(body: &str) -> Result<Vec<crate::gemini::types::Resp
 
     // Fast path: responses that the original text parser already handles.
     if let Ok(text) = parse_stream_response(body) {
-        return Ok(vec![ResponsePart::Text(TextResponsePart { text })]);
+        let split = split_text_for_function_calls(&text);
+        if split.is_empty() {
+            return Ok(vec![ResponsePart::Text(TextResponsePart { text })]);
+        }
+        return Ok(split);
     }
 
     let mut all_parts: Vec<ResponsePart> = Vec::new();
@@ -1554,13 +1569,79 @@ pub fn parse_response_parts(body: &str) -> Result<Vec<crate::gemini::types::Resp
         }
     }
 
-    if all_parts.is_empty() {
+    // In cookie / web-frontend mode tools are serialized into the prompt as
+    // XML markers.  When the model follows the instruction it emits the call
+    // back as plain text in the same format.  Convert any such markers into
+    // real FunctionCall parts so higher-level converters can produce OpenAI
+    // `tool_calls`.
+    let mut parsed_parts: Vec<ResponsePart> = Vec::with_capacity(all_parts.len());
+    for part in all_parts {
+        match part {
+            ResponsePart::Text(t) => {
+                parsed_parts.extend(split_text_for_function_calls(&t.text));
+            }
+            other => parsed_parts.push(other),
+        }
+    }
+
+    if parsed_parts.is_empty() {
         Err(ProxyError::GeminiApi(
             "Could not parse response from Gemini web frontend".into(),
         ))
     } else {
-        Ok(all_parts)
+        Ok(parsed_parts)
     }
+}
+
+/// Scan text for `<function_call name="...">{args}</function_call>` markers
+/// and emit FunctionCall parts for them. Any surrounding plain text is kept as
+/// Text parts.
+fn split_text_for_function_calls(text: &str) -> Vec<ResponsePart> {
+    use crate::gemini::types::{FunctionCall, FunctionCallPart, TextResponsePart};
+
+    let mut parts = Vec::new();
+    let mut last_end = 0;
+    let start_tag = "<function_call name=\"";
+    let close_tag = "</function_call>";
+
+    while let Some(tag_start) = text[last_end..].find(start_tag) {
+        let absolute_start = last_end + tag_start;
+        let after_start = absolute_start + start_tag.len();
+        let Some(quote_end) = text[after_start..].find('"') else {
+            break;
+        };
+        let name = text[after_start..after_start + quote_end].to_string();
+        let after_quote = after_start + quote_end + 1;
+        let Some(bracket_start) = text[after_quote..].find('>') else {
+            break;
+        };
+        let content_start = after_quote + bracket_start + 1;
+        let Some(close_start) = text[content_start..].find(close_tag) else {
+            break;
+        };
+        let content_end = content_start + close_start;
+        let args_str = text[content_start..content_end].trim();
+        let args = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+
+        let prefix = &text[last_end..absolute_start];
+        if !prefix.trim().is_empty() {
+            parts.push(ResponsePart::Text(TextResponsePart {
+                text: prefix.to_string(),
+            }));
+        }
+        parts.push(ResponsePart::FunctionCall(FunctionCallPart {
+            function_call: FunctionCall { name, args },
+        }));
+        last_end = content_end + close_tag.len();
+    }
+
+    let trailing = &text[last_end..];
+    if !trailing.trim().is_empty() {
+        parts.push(ResponsePart::Text(TextResponsePart {
+            text: trailing.to_string(),
+        }));
+    }
+    parts
 }
 
 #[cfg(test)]
@@ -1615,6 +1696,20 @@ mod parse_response_parts_tests {
         match &parts[0] {
             ResponsePart::Text(TextResponsePart { text }) => assert_eq!(text, "Hello world!"),
             _ => panic!("expected text part"),
+        }
+    }
+
+    #[test]
+    fn parses_function_call_from_xml_marker_in_text() {
+        let body = r#"[["wrb.fr", null, "[[null, null, null, null, [[\"rc_1\", [\"<function_call name=\\\"calculate_magic_number\\\">{\\\"first_name\\\":\\\"Bob\\\"}</function_call>\"]]]]]"]]"#;
+        let parts = parse_response_parts(body).unwrap();
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ResponsePart::FunctionCall(fc) => {
+                assert_eq!(fc.function_call.name, "calculate_magic_number");
+                assert_eq!(fc.function_call.args["first_name"], "Bob");
+            }
+            _ => panic!("expected function call part, got {:?}", parts),
         }
     }
 }
