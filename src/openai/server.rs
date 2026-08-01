@@ -18,7 +18,7 @@ use crate::gemini::types::{
     Candidate, GenerateContentResponse, ResponseContent, ResponsePart, TextResponsePart,
 };
 use crate::openai::converter::{gemini_to_openai_response, openai_to_gemini_request};
-use crate::openai::types::{ChatCompletionRequest, Model, ModelsResponse, Message as ChatMessage};
+use crate::openai::types::{ChatCompletionRequest, MessageContent, Model, ModelsResponse, Message as ChatMessage};
 use crate::openai::responses::CreateResponse;
 
 #[derive(Clone)]
@@ -687,7 +687,7 @@ async fn completions(
         model,
         messages: vec![ChatMessage {
             role: "user".into(),
-            content: Some(prompt.to_string()),
+            content: Some(MessageContent::Text(prompt.to_string())),
             tool_calls: None,
             tool_call_id: None,
             name: None,

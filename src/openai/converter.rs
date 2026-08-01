@@ -52,9 +52,9 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
     for msg in &req.messages {
         match msg.role.as_str() {
             "system" | "developer" => {
-                if let Some(text) = &msg.content {
+                if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text()) {
                     system_instruction = Some(Parts {
-                        parts: vec![Part::Text(TextPart { text: text.clone() })],
+                        parts: vec![Part::Text(TextPart { text })],
                     });
                 }
             }
@@ -67,9 +67,9 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
             }
             "assistant" => {
                 let mut parts: Vec<Part> = Vec::new();
-                if let Some(text) = &msg.content
+                if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text())
                     && !text.is_empty() {
-                        parts.push(Part::Text(TextPart { text: text.clone() }));
+                        parts.push(Part::Text(TextPart { text }));
                     }
                 if let Some(tool_calls) = &msg.tool_calls {
                     for tc in tool_calls {
@@ -93,11 +93,16 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
             }
             "tool" => {
                 let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
+                let content_text = msg
+                    .content
+                    .as_ref()
+                    .and_then(|c| c.as_text())
+                    .unwrap_or_else(|| "{}".to_string());
                 let name = msg.name.clone().or_else(|| {
                     tool_call_id_to_name.get(&tool_call_id).cloned()
                 }).unwrap_or_else(|| {
                     let response: serde_json::Value =
-                        serde_json::from_str(msg.content.as_deref().unwrap_or("{}"))
+                        serde_json::from_str(&content_text)
                             .unwrap_or(serde_json::Value::Object(Default::default()));
                     response
                         .get("name")
@@ -106,7 +111,7 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
                         .to_string()
                 });
                 let response: serde_json::Value =
-                    serde_json::from_str(msg.content.as_deref().unwrap_or("{}"))
+                    serde_json::from_str(&content_text)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
                 contents.push(Content {
                     role: "user".into(),
@@ -238,9 +243,9 @@ fn msg_to_parts(msg: &Message) -> Result<Vec<Part>> {
     let mut parts: Vec<Part> = Vec::new();
 
     if let Some(content) = &msg.content {
-        match serde_json::from_str::<MessageContent>(content) {
-            Ok(MessageContent::Parts(content_parts)) => {
-                for cp in &content_parts {
+        match content {
+            MessageContent::Parts(content_parts) => {
+                for cp in content_parts {
                     match cp.part_type.as_str() {
                         "text" => {
                             if let Some(text) = &cp.text {
@@ -262,13 +267,8 @@ fn msg_to_parts(msg: &Message) -> Result<Vec<Part>> {
                     }
                 }
             }
-            Ok(MessageContent::Text(text)) => {
-                parts.push(Part::Text(TextPart { text }));
-            }
-            Err(_) => {
-                parts.push(Part::Text(TextPart {
-                    text: content.clone(),
-                }));
+            MessageContent::Text(text) => {
+                parts.push(Part::Text(TextPart { text: text.clone() }));
             }
         }
     }
@@ -450,14 +450,14 @@ mod tests {
             messages: vec![
                 Message {
                     role: "system".into(),
-                    content: Some("You are a helpful assistant.".into()),
+                    content: Some(MessageContent::Text("You are a helpful assistant.".into())),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
                 },
                 Message {
                     role: "user".into(),
-                    content: Some("Hello!".into()),
+                    content: Some(MessageContent::Text("Hello!".into())),
                     tool_calls: None,
                     tool_call_id: None,
                     name: None,
@@ -526,7 +526,7 @@ mod tests {
             model: "current-model".into(),
             messages: vec![Message {
                 role: "assistant".into(),
-                content: Some("Let me check.".into()),
+                content: Some(MessageContent::Text("Let me check.".into())),
                 tool_calls: Some(vec![ToolCall {
                     id: "call_123".into(),
                     tool_type: "function".into(),
@@ -579,7 +579,7 @@ mod tests {
             model: "current-model".into(),
             messages: vec![Message {
                 role: "tool".into(),
-                content: Some("{\"temp\":\"22C\"}".into()),
+                content: Some(MessageContent::Text("{\"temp\":\"22C\"}".into())),
                 tool_calls: None,
                 tool_call_id: Some("call_123".into()),
                 name: Some("get_weather".into()),
@@ -623,7 +623,7 @@ mod tests {
             model: "current-model".into(),
             messages: vec![Message {
                 role: "user".into(),
-                content: Some("Hi".into()),
+                content: Some(MessageContent::Text("Hi".into())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -673,7 +673,7 @@ mod tests {
             model: "current-model".into(),
             messages: vec![Message {
                 role: "user".into(),
-                content: Some("Hi".into()),
+                content: Some(MessageContent::Text("Hi".into())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -869,7 +869,7 @@ mod tool_name_resolution_tests {
             messages: vec![
                 Message {
                     role: "assistant".into(),
-                    content: Some("".into()),
+                    content: Some(MessageContent::Text("".into())),
                     tool_calls: Some(vec![ToolCall {
                         id: "call_abc".into(),
                         tool_type: "function".into(),
@@ -883,7 +883,7 @@ mod tool_name_resolution_tests {
                 },
                 Message {
                     role: "tool".into(),
-                    content: Some("sunny".into()),
+                    content: Some(MessageContent::Text("sunny".into())),
                     tool_calls: None,
                     tool_call_id: Some("call_abc".into()),
                     name: None,

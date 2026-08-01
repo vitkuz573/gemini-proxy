@@ -51,7 +51,7 @@ pub struct ChatCompletionRequest {
 pub struct Message {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<MessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,6 +65,28 @@ pub struct Message {
 pub enum MessageContent {
     Text(String),
     Parts(Vec<ContentPart>),
+}
+
+impl MessageContent {
+    pub fn as_text(&self) -> Option<String> {
+        match self {
+            MessageContent::Text(s) => Some(s.clone()),
+            MessageContent::Parts(parts) => {
+                // Concatenate text parts; inline data cannot be represented as plain text.
+                let mut text = String::new();
+                for part in parts {
+                    if part.part_type == "text" && let Some(t) = &part.text {
+                        text.push_str(t);
+                    }
+                }
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -278,7 +300,7 @@ mod tests {
             model: "gpt-4".into(),
             messages: vec![Message {
                 role: "user".into(),
-                content: Some("Hello".into()),
+                content: Some(MessageContent::Text("Hello".to_string())),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -340,7 +362,7 @@ mod tests {
                 index: 0,
                 message: ResponseMessage {
                     role: "assistant".into(),
-                    content: Some("Hello!".into()),
+                    content: Some("Hello!".to_string()),
                     tool_calls: None,
                 },
                 finish_reason: Some("stop".into()),
@@ -405,7 +427,7 @@ mod tests {
                 index: 0,
                 delta: Delta {
                     role: Some("assistant".into()),
-                    content: Some("Hi".into()),
+                    content: Some("Hi".to_string()),
                     tool_calls: None,
                 },
                 finish_reason: None,
