@@ -327,23 +327,23 @@ fn build_anthropic_sse_response(
                 });
         }
 
-        if line.starts_with('[') {
-            if let Ok(parts) = crate::gemini::web_frontend::parse_response_parts(line) {
-                return Some(GenerateContentResponse {
-                    candidates: vec![Candidate {
-                        content: Some(ResponseContent {
-                            role: "model".to_string(),
-                            parts,
-                        }),
-                        finish_reason: None,
-                        index: 0,
-                        safety_ratings: None,
-                    }],
-                    usage_metadata: None,
-                    model_version: None,
-                    response_id: None,
-                });
-            }
+        if line.starts_with('[')
+            && let Ok(parts) = crate::gemini::web_frontend::parse_response_parts(line)
+        {
+            return Some(GenerateContentResponse {
+                candidates: vec![Candidate {
+                    content: Some(ResponseContent {
+                        role: "model".to_string(),
+                        parts,
+                    }),
+                    finish_reason: None,
+                    index: 0,
+                    safety_ratings: None,
+                }],
+                usage_metadata: None,
+                model_version: None,
+                response_id: None,
+            });
         }
 
         None

@@ -371,6 +371,7 @@ impl GeminiClient {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     fn apply_api_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(ref api_key) = self.auth.api_key {
             req.header("X-Goog-Api-Key", api_key)

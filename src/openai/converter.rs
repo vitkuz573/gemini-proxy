@@ -42,11 +42,9 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
     let mut tool_call_id_to_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for msg in &req.messages {
-        if msg.role == "assistant" {
-            if let Some(ref calls) = msg.tool_calls {
-                for tc in calls {
-                    tool_call_id_to_name.insert(tc.id.clone(), tc.function.name.clone());
-                }
+        if msg.role == "assistant" && let Some(ref calls) = msg.tool_calls {
+            for tc in calls {
+                tool_call_id_to_name.insert(tc.id.clone(), tc.function.name.clone());
             }
         }
     }

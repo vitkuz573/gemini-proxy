@@ -60,12 +60,12 @@ pub fn anthropic_to_gemini_request(req: &MessagesRequest) -> Result<GenerateCont
     let mut tool_use_id_to_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     for msg in &req.messages {
-        if msg.role == "assistant" {
-            if let MessageContent::Blocks(ref blocks) = msg.content {
-                for block in blocks {
-                    if let ContentBlock::ToolUse { id, name, .. } = block {
-                        tool_use_id_to_name.insert(id.clone(), name.clone());
-                    }
+        if msg.role == "assistant"
+            && let MessageContent::Blocks(ref blocks) = msg.content
+        {
+            for block in blocks {
+                if let ContentBlock::ToolUse { id, name, .. } = block {
+                    tool_use_id_to_name.insert(id.clone(), name.clone());
                 }
             }
         }

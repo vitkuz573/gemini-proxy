@@ -255,7 +255,7 @@ fn build_responses_sse_response(
 
                 if let Some(chunk) = gemini_chunk {
                     let mut chunk_text = String::new();
-                    if let Some(ref content) = chunk.candidates.first().and_then(|c| c.content.as_ref()) {
+                    if let Some(content) = chunk.candidates.first().and_then(|c| c.content.as_ref()) {
                         for part in &content.parts {
                             if let ResponsePart::Text(tp) = part {
                                 chunk_text.push_str(&tp.text);
@@ -646,23 +646,23 @@ fn parse_sse_line(line: &str) -> Option<GenerateContentResponse> {
             });
     }
 
-    if line.starts_with('[') {
-        if let Ok(parts) = crate::gemini::web_frontend::parse_response_parts(line) {
-            return Some(GenerateContentResponse {
-                candidates: vec![Candidate {
-                    content: Some(ResponseContent {
-                        role: "model".to_string(),
-                        parts,
-                    }),
-                    finish_reason: None,
-                    index: 0,
-                    safety_ratings: None,
-                }],
-                usage_metadata: None,
-                model_version: None,
-                response_id: None,
-            });
-        }
+    if line.starts_with('[')
+        && let Ok(parts) = crate::gemini::web_frontend::parse_response_parts(line)
+    {
+        return Some(GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    role: "model".to_string(),
+                    parts,
+                }),
+                finish_reason: None,
+                index: 0,
+                safety_ratings: None,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: None,
+        });
     }
 
     None
