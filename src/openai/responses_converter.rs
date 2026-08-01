@@ -438,3 +438,127 @@ pub fn gemini_chunk_to_response_stream_event(
 
     Some(events)
 }
+
+#[cfg(test)]
+mod response_stream_event_tests {
+    use super::*;
+    use crate::gemini::types::{Candidate, FunctionCall, FunctionCallPart, GenerateContentResponse, ResponseContent, ResponsePart, TextResponsePart};
+
+    #[test]
+    fn emits_function_call_arguments_delta_for_function_call_part() {
+        let resp = GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    role: "model".into(),
+                    parts: vec![ResponsePart::FunctionCall(FunctionCallPart {
+                        function_call: FunctionCall {
+                            name: "get_weather".into(),
+                            args: serde_json::json!({"city": "Paris"}),
+                        },
+                    })],
+                }),
+                finish_reason: None,
+                index: 0,
+                safety_ratings: None,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: None,
+        };
+
+        let mut call_ids = std::collections::HashMap::new();
+        let mut call_index = 0u32;
+        let events = gemini_chunk_to_response_stream_event(
+            &resp,
+            "gemini-pro",
+            1,
+            &mut call_ids,
+            &mut call_index,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "response.function_call_arguments.delta");
+        assert_eq!(events[0].content_index, Some(0));
+        assert_eq!(call_index, 1);
+    }
+
+    #[test]
+    fn reuses_call_id_for_same_name_and_args() {
+        let resp = GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    role: "model".into(),
+                    parts: vec![ResponsePart::FunctionCall(FunctionCallPart {
+                        function_call: FunctionCall {
+                            name: "get_weather".into(),
+                            args: serde_json::json!({"city": "Paris"}),
+                        },
+                    })],
+                }),
+                finish_reason: None,
+                index: 0,
+                safety_ratings: None,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: None,
+        };
+
+        let mut call_ids = std::collections::HashMap::new();
+        let mut call_index = 0u32;
+        let events1 = gemini_chunk_to_response_stream_event(
+            &resp,
+            "gemini-pro",
+            1,
+            &mut call_ids,
+            &mut call_index,
+        )
+        .unwrap();
+        let events2 = gemini_chunk_to_response_stream_event(
+            &resp,
+            "gemini-pro",
+            2,
+            &mut call_ids,
+            &mut call_index,
+        )
+        .unwrap();
+
+        assert_eq!(events1[0].item_id, events2[0].item_id);
+    }
+
+    #[test]
+    fn emits_output_text_delta_for_text_part() {
+        let resp = GenerateContentResponse {
+            candidates: vec![Candidate {
+                content: Some(ResponseContent {
+                    role: "model".into(),
+                    parts: vec![ResponsePart::Text(TextResponsePart {
+                        text: "Hello".into(),
+                    })],
+                }),
+                finish_reason: None,
+                index: 0,
+                safety_ratings: None,
+            }],
+            usage_metadata: None,
+            model_version: None,
+            response_id: None,
+        };
+
+        let mut call_ids = std::collections::HashMap::new();
+        let mut call_index = 0u32;
+        let events = gemini_chunk_to_response_stream_event(
+            &resp,
+            "gemini-pro",
+            1,
+            &mut call_ids,
+            &mut call_index,
+        )
+        .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "response.output_text.delta");
+        assert_eq!(events[0].delta, Some("Hello".into()));
+    }
+}
