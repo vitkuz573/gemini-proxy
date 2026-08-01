@@ -274,6 +274,71 @@ contain inline reasoning rather than separate thinking blocks. There is no known
 frontend field to force a thinking-style response beyond selecting the Pro/Auto
 category.
 
+## Image / file uploads
+
+OpenAI `image_url` data URLs, OpenAI Responses API `input_image` parts, and
+Anthropic `image` blocks are converted to Gemini `Part::InlineData` by the
+OpenAI and Anthropic converters. When cookie authentication is used, the proxy
+uploads those bytes to the same Google resumable endpoint the Gemini web UI
+uses:
+
+```text
+POST https://push.clients6.google.com/upload/
+Headers:
+  x-goog-upload-command: start
+  x-goog-upload-header-content-length: <bytes>
+  x-goog-upload-protocol: resumable
+  x-tenant-id: bard-storage
+Body: File name: <filename>
+```
+
+The response header `X-Goog-Upload-URL` contains the `upload_id` and the
+finalize URL. The proxy then posts the raw bytes to that URL:
+
+```text
+POST <X-Goog-Upload-URL>
+Headers:
+  x-goog-upload-command: upload, finalize
+  x-goog-upload-offset: 0
+Body: <raw image bytes>
+```
+
+The response body is a `contrib_service` reference path such as
+`/contrib_service/ttl_1d/<token>`. That reference is inserted into
+`inner_req_list[0]` in the live-captured format:
+
+```json
+[
+  "prompt text",
+  0,
+  null,
+  [
+    [
+      ["/contrib_service/ttl_1d/...", 1, null, "image/png"],
+      "test.png",
+      null, null, null, null, null, null,
+      [0]
+    ]
+  ],
+  null,
+  null,
+  0
+]
+```
+
+When no attachments are present slot 0 keeps the simple string-only format.
+The implementation lives in `src/gemini/web_frontend.rs`:
+
+- `WebFrontendClient::upload_file` performs the two-step resumable upload.
+- `upload_inline_attachments` extracts inline data parts from the request and
+  uploads them before `StreamGenerate` is called.
+- `build_inner_req_list` emits slot 0 with or without the attachment list.
+
+Supported attachment MIME types follow the Gemini web frontend: `image/png`,
+`image/jpeg`, `image/webp`, `image/gif`, and `application/pdf`. File names are
+derived from the MIME type (`image/png` -> `attachment.png`) and an index
+suffix is added when a single request contains multiple attachments.
+
 ## Stateful multi-turn
 
 By default every request to `/v1/chat/completions` or `/v1/messages` in

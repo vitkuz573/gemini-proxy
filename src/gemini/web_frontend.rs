@@ -1,11 +1,25 @@
 use std::collections::HashMap;
 
+use base64::Engine;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tracing::{debug, error, warn};
 
 use crate::error::{ProxyError, Result};
 use crate::gemini::types::ResponsePart;
+
+const PUSH_UPLOAD_URL: &str = "https://push.clients6.google.com/upload/";
+
+/// An uploaded file reference ready to be placed into StreamGenerate slot 0.
+#[derive(Debug, Clone)]
+pub struct WebAttachment {
+    /// Google contrib_service reference path (e.g. `/contrib_service/ttl_1d/...`).
+    pub reference: String,
+    /// MIME type of the uploaded file.
+    pub mime_type: String,
+    /// File name sent to the upload endpoint.
+    pub filename: String,
+}
 
 const WEB_BASE_URL: &str = "https://gemini.google.com";
 const USER_AGENT: &str =
@@ -428,25 +442,28 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let prompt = serialize_request_to_prompt(request);
-        let browser_payload = self.get_browser_payload(&prompt).await;
+        let browser_payload = self.get_browser_payload("").await;
         let browser_payload_ref = browser_payload.as_ref().map(|p| match p {
             #[cfg(feature = "browser-attestation")]
             BrowserPayloadPlaceholder::Feature(payload) => payload,
             #[cfg(not(feature = "browser-attestation"))]
             BrowserPayloadPlaceholder::Disabled => unreachable!(),
         });
+
+        // Upload any inline data parts before building the StreamGenerate payload.
+        let attachments = self.upload_inline_attachments(request).await?;
         let (inner_req_list, used_browser) = build_inner_req_list(
             request,
             category_enum,
             self.session.conversation_state.as_ref(),
             browser_payload_ref,
+            &attachments,
         );
         let body = build_stream_generate_body(&inner_req_list, access_token.as_deref().unwrap_or(""));
 
         let headers = self.build_headers();
 
-        debug!(mode_id, category_enum, used_browser, "Sending request to web frontend");
+        debug!(mode_id, category_enum, used_browser, attachments_count = attachments.len(), "Sending request to web frontend");
 
         let client = self.client.clone();
         let cookie_header = self.build_cookie_header();
@@ -552,25 +569,28 @@ impl WebFrontendClient {
 
         let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
-        let prompt = serialize_request_to_prompt(request);
-        let browser_payload = self.get_browser_payload(&prompt).await;
+        let browser_payload = self.get_browser_payload("").await;
         let browser_payload_ref = browser_payload.as_ref().map(|p| match p {
             #[cfg(feature = "browser-attestation")]
             BrowserPayloadPlaceholder::Feature(payload) => payload,
             #[cfg(not(feature = "browser-attestation"))]
             BrowserPayloadPlaceholder::Disabled => unreachable!(),
         });
+
+        // Upload any inline data parts before building the StreamGenerate payload.
+        let attachments = self.upload_inline_attachments(request).await?;
         let (inner_req_list, used_browser) = build_inner_req_list(
             request,
             category_enum,
             self.session.conversation_state.as_ref(),
             browser_payload_ref,
+            &attachments,
         );
         let body = build_stream_generate_body(&inner_req_list, access_token.as_deref().unwrap_or(""));
 
         let headers = self.build_headers();
 
-        debug!(mode_id, category_enum, used_browser, "Sending streaming request to web frontend");
+        debug!(mode_id, category_enum, used_browser, attachments_count = attachments.len(), "Sending streaming request to web frontend");
 
         let client = self.client.clone();
         let cookie_header = self.build_cookie_header();
@@ -631,11 +651,138 @@ impl WebFrontendClient {
         self.session = WebSession::default();
     }
 
+    /// Find all inline data parts in the request contents, upload them to the
+    /// Google resumable upload endpoint, and return attachment descriptors.
+    ///
+    /// Text/function parts are left untouched; only `Part::InlineData` is
+    /// uploaded. File names are derived from the MIME type when no explicit name
+    /// is present.
+    async fn upload_inline_attachments(
+        &self,
+        request: &crate::gemini::types::GenerateContentRequest,
+    ) -> Result<Vec<WebAttachment>> {
+        use crate::gemini::types::Part;
+
+        let mut attachments = Vec::new();
+        for content in &request.contents {
+            for (part_idx, part) in content.parts.iter().enumerate() {
+                if let Part::InlineData(inline) = part {
+                    let mime = inline.inline_data.mime_type.clone();
+                    let filename = derive_attachment_filename(&mime, part_idx);
+                    let bytes = base64_decode(&inline.inline_data.data)?;
+                    let reference = self
+                        .upload_file(&filename, &mime, bytes)
+                        .await?;
+                    attachments.push(WebAttachment {
+                        reference,
+                        mime_type: mime,
+                        filename,
+                    });
+                }
+            }
+        }
+        Ok(attachments)
+    }
+
     /// Returns true if the request should be considered a new conversation.
     /// Used to decide whether to start a fresh browser page context.
     #[allow(dead_code)]
     pub fn is_new_conversation(&self) -> bool {
         self.session.conversation_state.is_none()
+    }
+
+    /// Upload a file to Google's resumable upload endpoint and return the
+    /// `contrib_service` reference path.
+    ///
+    /// This is the same two-step flow the Gemini web frontend uses for images
+    /// attached to a prompt:
+    /// 1. `POST /upload/` with `x-goog-upload-command: start` to obtain an upload URL.
+    /// 2. `POST <upload_url>` with `x-goog-upload-command: upload, finalize` and the raw bytes.
+    ///
+    /// The returned path is placed in `inner_req_list[0]` so the model can read the
+    /// file from Google's storage.
+    pub async fn upload_file(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+    ) -> Result<String> {
+        let cookie_header = self.build_cookie_header();
+
+        // Step 1: initiate the resumable upload.
+        let start_response = self
+            .client
+            .post(PUSH_UPLOAD_URL)
+            .header("x-goog-upload-command", "start")
+            .header("x-goog-upload-header-content-length", bytes.len().to_string())
+            .header("x-goog-upload-protocol", "resumable")
+            .header("x-tenant-id", "bard-storage")
+            .header("Cookie", &cookie_header)
+            .header("Origin", WEB_BASE_URL)
+            .header("Referer", format!("{WEB_BASE_URL}/"))
+            .header("User-Agent", USER_AGENT)
+            .body(format!("File name: {filename}"))
+            .send()
+            .await
+            .map_err(|e| ProxyError::GeminiApi(format!("Failed to start file upload: {e}")))?;
+
+        let status = start_response.status();
+        if !status.is_success() {
+            let body = start_response.text().await.unwrap_or_default();
+            return Err(ProxyError::GeminiApi(format!(
+                "File upload start failed: HTTP {status}: {body}"
+            )));
+        }
+
+        let upload_url = start_response
+            .headers()
+            .get("x-goog-upload-url")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                ProxyError::GeminiApi(
+                    "File upload start response missing X-Goog-Upload-URL".into(),
+                )
+            })?;
+
+        // Step 2: upload the bytes and finalize.
+        let finalize_response = self
+            .client
+            .post(upload_url)
+            .header("x-goog-upload-command", "upload, finalize")
+            .header("x-goog-upload-offset", "0")
+            .header("x-tenant-id", "bard-storage")
+            .header("Cookie", &cookie_header)
+            .header("Origin", WEB_BASE_URL)
+            .header("Referer", format!("{WEB_BASE_URL}/"))
+            .header("User-Agent", USER_AGENT)
+            .header("Content-Type", mime_type)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| ProxyError::GeminiApi(format!("Failed to finalize file upload: {e}")))?;
+
+        let status = finalize_response.status();
+        if !status.is_success() {
+            let body = finalize_response.text().await.unwrap_or_default();
+            return Err(ProxyError::GeminiApi(format!(
+                "File upload finalize failed: HTTP {status}: {body}"
+            )));
+        }
+
+        let reference = finalize_response
+            .text()
+            .await
+            .map_err(|e| ProxyError::GeminiApi(format!("Failed to read upload response: {e}")))?
+            .trim()
+            .to_string();
+
+        if reference.is_empty() {
+            return Err(ProxyError::GeminiApi(
+                "File upload returned empty reference".into(),
+            ));
+        }
+
+        Ok(reference)
     }
 
     /// Discover the models available to this account via the web frontend model picker.
@@ -914,12 +1061,16 @@ fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
 /// (request UUID).  This lets the browser supply valid slots 2/3/4/17 and any
 /// continuation tokens it generated.  When the browser payload is absent we
 /// fall back to the flattened-prompt path (slot 2 empty, slots 3/4 empty).
+///
+/// When `attachments` is non-empty, slot 0 is emitted with the captured image
+/// attachment array at index 3.  Otherwise slot 0 is the plain string prompt.
 #[cfg(feature = "browser-attestation")]
 fn build_inner_req_list(
     request: &crate::gemini::types::GenerateContentRequest,
     category_enum: u64,
     conversation_state: Option<&WebConversationState>,
     browser_payload: Option<&BrowserAttestationPayload>,
+    attachments: &[WebAttachment],
 ) -> (Vec<Value>, bool) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -927,6 +1078,31 @@ fn build_inner_req_list(
         .as_secs();
 
     let prompt = serialize_request_to_prompt(request);
+
+    // Build slot 0 with optional attachments. Live captures show:
+    //   [prompt, 0, null, [[attachment...], filename, ...], null, null, 0]
+    // When no attachments are present, keep the simple string format.
+    let slot0 = if attachments.is_empty() {
+        json!([prompt, 0, null, null, null, null, 0])
+    } else {
+        let attachment_list: Vec<Value> = attachments
+            .iter()
+            .map(|att| {
+                json!([
+                    [att.reference.clone(), 1, null, att.mime_type.clone()],
+                    att.filename.clone(),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    [0]
+                ])
+            })
+            .collect();
+        json!([prompt, 0, null, attachment_list, null, null, 0])
+    };
 
     // If a browser payload is available, use it as the source of truth for the
     // tricky attestation/state slots.  The caller already logged failure if the
@@ -956,7 +1132,7 @@ fn build_inner_req_list(
         slots
     };
 
-    inner[0] = json!([prompt, 0, null, null, null, null, 0]);
+    inner[0] = slot0;
     inner[1] = json!(["en"]);
     inner[7] = json!(1);
     inner[10] = json!(1);
@@ -992,6 +1168,7 @@ fn build_inner_req_list(
     category_enum: u64,
     conversation_state: Option<&WebConversationState>,
     _browser_payload: Option<&BrowserAttestationPayload>,
+    attachments: &[WebAttachment],
 ) -> (Vec<Value>, bool) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1000,8 +1177,30 @@ fn build_inner_req_list(
 
     let prompt = serialize_request_to_prompt(request);
 
+    let slot0 = if attachments.is_empty() {
+        json!([prompt, 0, null, null, null, null, 0])
+    } else {
+        let attachment_list: Vec<Value> = attachments
+            .iter()
+            .map(|att| {
+                json!([
+                    [att.reference.clone(), 1, null, att.mime_type.clone()],
+                    att.filename.clone(),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    [0]
+                ])
+            })
+            .collect();
+        json!([prompt, 0, null, attachment_list, null, null, 0])
+    };
+
     let mut inner = vec![Value::Null; 97];
-    inner[0] = json!([prompt, 0, null, null, null, null, 0]);
+    inner[0] = slot0;
     inner[1] = json!(["en"]);
     inner[2] = match conversation_state {
         Some(state) => state.to_inner_meta(),
@@ -1044,6 +1243,39 @@ fn build_stream_generate_body(inner_req_list: &[Value], at: &str) -> String {
         format!("at={}", urlencoding::encode(at)),
     ];
     form_data.join("&")
+}
+
+/// Derive a file name for an uploaded attachment from its MIME type.
+///
+/// Live captures use `test.png`; the proxy falls back to an extension derived
+/// from the MIME type (e.g. `image/jpeg` -> `image.jpeg`) and an index suffix
+/// when multiple attachments share the same MIME type.
+fn derive_attachment_filename(mime_type: &str, index: usize) -> String {
+    let ext = match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "application/pdf" => "pdf",
+        _ => {
+            // Strip anything after a semicolon and use the subtype if available.
+            let clean = mime_type.split(';').next().unwrap_or(mime_type);
+            clean.split('/').nth(1).unwrap_or("bin")
+        }
+    };
+    if index == 0 {
+        format!("attachment.{ext}")
+    } else {
+        format!("attachment_{index}.{ext}")
+    }
+}
+
+/// Decode base64 data, tolerating common whitespace.
+fn base64_decode(data: &str) -> Result<Vec<u8>> {
+    let stripped: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(&stripped)
+        .map_err(|e| ProxyError::BadRequest(format!("Invalid base64 inline data: {e}")))
 }
 
 /// Heuristic detection of Google attestation / invalid-state errors.
@@ -1139,7 +1371,9 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
                     .iter()
                     .map(|p| match p {
                         Part::Text(t) => xml_escape(&t.text),
-                        Part::InlineData(_) => "[inline data]".to_string(),
+                        // Inline data parts are uploaded separately and referenced from
+                        // slot 0; omit them from the flattened text prompt.
+                        Part::InlineData(_) => String::new(),
                         Part::FunctionCall(fc) => format!(
                             "<function_call name=\"{}\">{}</function_call>",
                             xml_escape(&fc.function_call.name),
@@ -1164,7 +1398,10 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
             .iter()
             .map(|p| match p {
                 Part::Text(t) => xml_escape(&t.text),
-                Part::InlineData(_) => "[inline data]".to_string(),
+                // Inline data parts are uploaded separately and referenced from
+                // slot 0; omit them from the flattened text prompt so the model
+                // does not see placeholder noise.
+                Part::InlineData(_) => String::new(),
                 Part::FunctionCall(fc) => format!(
                     "<function_call name=\"{}\">{}</function_call>",
                     xml_escape(&fc.function_call.name),
@@ -1912,7 +2149,7 @@ mod build_inner_req_list_tests {
     #[test]
     fn slot_30_uses_provided_category_enum() {
         let request = minimal_request();
-        let (inner, _used_browser) = build_inner_req_list(&request, 3, None, None);
+        let (inner, _used_browser) = build_inner_req_list(&request, 3, None, None, &[]);
         assert_eq!(inner.len(), 97);
         assert_eq!(inner[30], json!([3]));
     }
@@ -1920,21 +2157,84 @@ mod build_inner_req_list_tests {
     #[test]
     fn slot_30_defaults_to_auto_for_fallback() {
         let request = minimal_request();
-        let (inner, _used_browser) = build_inner_req_list(&request, 4, None, None);
+        let (inner, _used_browser) = build_inner_req_list(&request, 4, None, None, &[]);
         assert_eq!(inner[30], json!([4]));
     }
 
     #[test]
     fn slot_30_reflects_thinking_category() {
         let request = minimal_request();
-        let (inner, _used_browser) = build_inner_req_list(&request, 2, None, None);
+        let (inner, _used_browser) = build_inner_req_list(&request, 2, None, None, &[]);
         assert_eq!(inner[30], json!([2]));
     }
 
     #[test]
     fn slot_30_reflects_flash_lite_category() {
         let request = minimal_request();
-        let (inner, _used_browser) = build_inner_req_list(&request, 6, None, None);
+        let (inner, _used_browser) = build_inner_req_list(&request, 6, None, None, &[]);
         assert_eq!(inner[30], json!([6]));
+    }
+
+    #[test]
+    fn slot_0_without_attachments_is_string_format() {
+        let request = minimal_request();
+        let (inner, _used_browser) = build_inner_req_list(&request, 4, None, None, &[]);
+        assert_eq!(
+            inner[0],
+            json!(["hello", 0, null, null, null, null, 0])
+        );
+    }
+
+    #[test]
+    fn slot_0_with_attachments_emits_captured_format() {
+        let request = minimal_request();
+        let attachments = vec![WebAttachment {
+            reference: "/contrib_service/ttl_1d/abc123".into(),
+            mime_type: "image/png".into(),
+            filename: "test.png".into(),
+        }];
+        let (inner, _used_browser) = build_inner_req_list(&request, 4, None, None, &attachments);
+        let expected = json!([
+            "hello",
+            0,
+            null,
+            [[[
+                "/contrib_service/ttl_1d/abc123",
+                1,
+                null,
+                "image/png"
+            ], "test.png", null, null, null, null, null, null, [0]]],
+            null,
+            null,
+            0
+        ]);
+        assert_eq!(inner[0], expected);
+    }
+
+    #[test]
+    fn derive_attachment_filename_uses_extension_from_mime() {
+        assert_eq!(derive_attachment_filename("image/png", 0), "attachment.png");
+        assert_eq!(derive_attachment_filename("image/jpeg", 0), "attachment.jpg");
+        assert_eq!(derive_attachment_filename("image/webp", 0), "attachment.webp");
+        assert_eq!(
+            derive_attachment_filename("application/pdf", 1),
+            "attachment_1.pdf"
+        );
+    }
+
+    #[test]
+    fn derive_attachment_filename_falls_back_to_subtype() {
+        assert_eq!(derive_attachment_filename("text/plain", 0), "attachment.plain");
+    }
+
+    #[test]
+    fn base64_decode_tolerates_whitespace() {
+        let decoded = base64_decode("aGVsbG8g\nd29ybGQ=").unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "hello world");
+    }
+
+    #[test]
+    fn base64_decode_rejects_invalid_data() {
+        assert!(base64_decode("!!!").is_err());
     }
 }
