@@ -856,3 +856,74 @@ mod tests {
         assert!(parse_data_url("https://example.com/image.png").is_none());
     }
 }
+
+#[cfg(test)]
+mod tool_name_resolution_tests {
+    use super::*;
+    use crate::openai::types::{ChatCompletionRequest, FunctionCall, Message, ToolCall};
+
+    #[test]
+    fn resolves_tool_name_from_prior_assistant_tool_calls() {
+        let req = ChatCompletionRequest {
+            model: "gemini-pro".into(),
+            messages: vec![
+                Message {
+                    role: "assistant".into(),
+                    content: Some("".into()),
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_abc".into(),
+                        tool_type: "function".into(),
+                        function: FunctionCall {
+                            name: "get_weather".into(),
+                            arguments: "{}".into(),
+                        },
+                    }]),
+                    tool_call_id: None,
+                    name: None,
+                },
+                Message {
+                    role: "tool".into(),
+                    content: Some("sunny".into()),
+                    tool_calls: None,
+                    tool_call_id: Some("call_abc".into()),
+                    name: None,
+                },
+            ],
+            tools: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            stream: None,
+            stream_options: None,
+            response_format: None,
+            tool_choice: None,
+            n: None,
+            stop: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            user: None,
+            reasoning_effort: None,
+            service_tier: None,
+            store: None,
+            metadata: None,
+            seed: None,
+            parallel_tool_calls: None,
+        };
+
+        let gemini_req = openai_to_gemini_request(&req).unwrap();
+        let contents = gemini_req.contents;
+        assert_eq!(contents.len(), 2);
+
+        // Second content should be a user turn containing a function response
+        // part with the resolved function name.
+        let user_parts = contents[1].parts.clone();
+        assert_eq!(user_parts.len(), 1);
+        match &user_parts[0] {
+            crate::gemini::types::Part::FunctionResponse(fr) => {
+                assert_eq!(fr.function_response.name, "get_weather");
+            }
+            other => panic!("expected function response part, got {:?}", other),
+        }
+    }
+}
