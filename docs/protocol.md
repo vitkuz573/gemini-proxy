@@ -143,6 +143,37 @@ The hex IDs are **not stable**. Google rotates them between sessions, so
 clients should either use the human-readable ID or call `GET /v1/models` first
 and use the returned `root` for subsequent chat requests.
 
+### Model category routing
+
+Each mode entry in `GetUserStatus` carries a category enum at index `17`. The
+proxy copies this value into `inner_req_list[30]` on every `StreamGenerate`
+call, which tells the Gemini frontend which model family to use. The known
+category values are:
+
+| Enum | Category                | Typical model name(s)        |
+|------|-------------------------|------------------------------|
+| `1`  | Fast                    | `gemini-*-flash`             |
+| `2`  | Thinking                | `gemini-*-thinking`          |
+| `3`  | Pro                     | `gemini-*-pro`               |
+| `4`  | Auto                    | fallback / unknown models    |
+| `5`  | Fast-Dynamic-Thinking   | experimental dynamic thinking|
+| `6`  | Flash-Lite              | `gemini-*-flash-lite`        |
+
+Model resolution works like this:
+
+1. `models/<hex>` — the proxy looks up the hex ID in the cached `/v1/models`
+   list and uses its reported category enum. If the ID is not cached, it falls
+   back to deriving the category from the ID string and logs a warning.
+2. `gemini-<version>-<category>` — the proxy looks up the human-readable ID in
+   the cached `/v1/models` list and uses the category enum returned by the
+   frontend. If the ID is not in the cache, the cache is refreshed once.
+3. Anything else that still does not resolve is treated as `Auto (4)` and a
+   warning is logged, so the request can continue instead of failing outright.
+
+The `inner_req_list[30]` slot is therefore the single control point for model
+category routing. Previously the proxy always sent `[4]` (Auto); it now sends
+the category that matches the requested model ID.
+
 ## Chat completions
 
 The chat endpoint uses `StreamGenerate` (`assistant.lamda.BardFrontendService/StreamGenerate`)

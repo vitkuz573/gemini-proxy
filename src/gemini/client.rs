@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use reqwest::Client;
 use tokio::sync::Mutex;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::error::{ProxyError, Result};
 
@@ -175,7 +175,10 @@ impl GeminiClient {
                 .as_ref()
                 .and_then(|models| models.iter().find(|m| m.id == stripped))
                 .map(|m| m.category_enum)
-                .unwrap_or_else(|| super::web_frontend::WebModelInfo::derive_category_enum(stripped, ""));
+                .unwrap_or_else(|| {
+                    warn!(model = stripped, "Unknown hex mode ID; deriving category from ID");
+                    super::web_frontend::WebModelInfo::derive_category_enum(stripped, "")
+                });
             return Ok((stripped.to_string(), cat));
         }
 
@@ -189,7 +192,7 @@ impl GeminiClient {
             }
         }
 
-        debug!(model, "model not in cache, refreshing web model list");
+        warn!(model, "model not in cache, refreshing web model list");
         self.list_models_via_web().await?;
 
         {
@@ -201,9 +204,8 @@ impl GeminiClient {
             }
         }
 
-        Err(ProxyError::BadRequest(format!(
-            "Unknown model '{model}'. Call /v1/models to list available models."
-        )))
+        warn!(model, "Unknown human-readable model ID; falling back to Auto (4)");
+        Ok((model.to_string(), 4))
     }
 
     async fn generate_content_via_web(

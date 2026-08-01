@@ -79,6 +79,19 @@ impl WebModelInfo {
         derive_category_enum_inner(id, title)
     }
 
+    /// Construct a model info value from an explicit category string for test/fixture use.
+    #[cfg(test)]
+    pub(crate) fn from_parts(id: &str, title: &str, category: &str, category_enum: u64) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            description: String::new(),
+            versioned_name: Some(title.into()),
+            category: category.into(),
+            category_enum,
+        }
+    }
+
     pub fn human_id(&self) -> String {
         let source = self
             .versioned_name
@@ -859,6 +872,9 @@ fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
         3
     } else if combined.contains("auto") {
         4
+    } else if combined.contains("flash") {
+        // "Flash" without a more specific qualifier is treated as Fast.
+        1
     } else {
         1
     }
@@ -1818,5 +1834,107 @@ mod xml_escape_tests {
     #[test]
     fn leaves_plain_text_unchanged() {
         assert_eq!(xml_escape("plain text 123"), "plain text 123");
+    }
+}
+
+#[cfg(test)]
+mod derive_category_enum_tests {
+    use super::WebModelInfo;
+
+    #[test]
+    fn maps_flash_to_fast() {
+        assert_eq!(WebModelInfo::derive_category_enum("fbb127bbb056c959", "3.6 Flash"), 1);
+    }
+
+    #[test]
+    fn maps_thinking_to_thinking() {
+        assert_eq!(WebModelInfo::derive_category_enum("abc", "3.1 Thinking"), 2);
+    }
+
+    #[test]
+    fn maps_deep_to_thinking() {
+        assert_eq!(WebModelInfo::derive_category_enum("abc", "Deep"), 2);
+    }
+
+    #[test]
+    fn maps_pro_to_pro() {
+        assert_eq!(WebModelInfo::derive_category_enum("9d8ca3786ebdfbea", "3.1 Pro"), 3);
+    }
+
+    #[test]
+    fn maps_auto_to_auto() {
+        assert_eq!(WebModelInfo::derive_category_enum("abc", "Auto"), 4);
+    }
+
+    #[test]
+    fn maps_lite_to_flash_lite() {
+        assert_eq!(WebModelInfo::derive_category_enum("cf41b0e0dd7d53e5", "3.5 Flash-Lite"), 6);
+    }
+
+    #[test]
+    fn maps_unknown_to_fast() {
+        assert_eq!(WebModelInfo::derive_category_enum("xyz", "Some Model"), 1);
+    }
+
+    #[test]
+    fn human_id_from_versioned_name() {
+        let info = WebModelInfo::from_parts("abc", "3.1 Pro", "PRO", 3);
+        assert_eq!(info.human_id(), "gemini-3.1-pro");
+    }
+
+    #[test]
+    fn human_id_from_title_when_versioned_missing() {
+        let mut info = WebModelInfo::from_parts("abc", "Flash", "FAST", 1);
+        info.versioned_name = None;
+        assert_eq!(info.human_id(), "gemini-flash");
+    }
+}
+
+#[cfg(test)]
+mod build_inner_req_list_tests {
+    use super::*;
+
+    fn minimal_request() -> crate::gemini::types::GenerateContentRequest {
+        crate::gemini::types::GenerateContentRequest {
+            contents: vec![crate::gemini::types::Content {
+                role: "user".into(),
+                parts: vec![crate::gemini::types::Part::Text(crate::gemini::types::TextPart {
+                    text: "hello".into(),
+                })],
+            }],
+            system_instruction: None,
+            generation_config: None,
+            tools: None,
+            tool_config: None,
+        }
+    }
+
+    #[test]
+    fn slot_30_uses_provided_category_enum() {
+        let request = minimal_request();
+        let (inner, _used_browser) = build_inner_req_list(&request, 3, None, None);
+        assert_eq!(inner.len(), 97);
+        assert_eq!(inner[30], json!([3]));
+    }
+
+    #[test]
+    fn slot_30_defaults_to_auto_for_fallback() {
+        let request = minimal_request();
+        let (inner, _used_browser) = build_inner_req_list(&request, 4, None, None);
+        assert_eq!(inner[30], json!([4]));
+    }
+
+    #[test]
+    fn slot_30_reflects_thinking_category() {
+        let request = minimal_request();
+        let (inner, _used_browser) = build_inner_req_list(&request, 2, None, None);
+        assert_eq!(inner[30], json!([2]));
+    }
+
+    #[test]
+    fn slot_30_reflects_flash_lite_category() {
+        let request = minimal_request();
+        let (inner, _used_browser) = build_inner_req_list(&request, 6, None, None);
+        assert_eq!(inner[30], json!([6]));
     }
 }
