@@ -401,10 +401,17 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
         let mut buffer = String::new();
         let mut stream = std::pin::pin!(stream);
         let mut accumulated_text = String::new();
+        let mut collected_body = String::new();
         let id = crate::openai::converter::generate_id();
         let created = chrono::UTC::now().timestamp();
         let mut sent_initial = false;
         let mut sent_finish = false;
+        // Stable tool-call ids keyed by function name and arguments (per chunk,
+        // regenerated each chunk as required by the prompt, but stable across
+        // chunks because the same name/args produce the same id).
+        let mut tool_call_ids: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        let mut next_tool_index: u32 = 0;
 
         while let Some(chunk_result) = stream.next().await {
             let bytes = match chunk_result {
@@ -416,6 +423,7 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
             };
 
             buffer.push_str(&String::from_utf8_lossy(&bytes));
+            collected_body.push_str(&String::from_utf8_lossy(&bytes));
 
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..newline_pos].trim().to_string();
@@ -425,266 +433,127 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
                     continue;
                 }
 
-                if let Some(data) = line.strip_prefix("data: ") {
-                    if data == "[DONE]" {
-                        break;
-                    }
-
-                    let gemini_chunk = match serde_json::from_str::<GenerateContentResponse>(data) {
-                        Ok(c) => Some(c),
-                        Err(_) => {
-                            serde_json::from_str::<Value>(data)
-                                .ok()
-                                .and_then(|parsed| {
-                                    crate::gemini::web_frontend::extract_text_from_parsed_response(
-                                        &parsed,
-                                    )
-                                    .map(|text| GenerateContentResponse {
-                                        candidates: vec![Candidate {
-                                            content: Some(ResponseContent {
-                                                role: "model".to_string(),
-                                                parts: vec![ResponsePart::Text(
-                                                    TextResponsePart { text },
-                                                )],
-                                            }),
-                                            finish_reason: None,
-                                            index: 0,
-                                            safety_ratings: None,
-                                        }],
-                                        usage_metadata: None,
-                                        model_version: None,
-                                        response_id: None,
-                                    })
-                                })
-                        }
+                let gemini_chunk = parse_sse_line(&line);
+                if let Some(chunk) = gemini_chunk {
+                    let candidate = match chunk.candidates.first() {
+                        Some(c) => c,
+                        None => continue,
                     };
 
-                    if let Some(chunk) = gemini_chunk {
-                        let candidate = match chunk.candidates.first() {
-                            Some(c) => c,
-                            None => continue,
-                        };
-
-                        let mut chunk_text = String::new();
-                        let mut chunk_tool_calls: Vec<crate::openai::types::ToolCallDelta> = Vec::new();
-                        if let Some(ref content) = candidate.content {
-                            for part in &content.parts {
-                                match part {
-                                    crate::gemini::types::ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
-                                    crate::gemini::types::ResponsePart::Thought(tp) => {
-                                        chunk_text.push_str("<thinking>");
-                                        chunk_text.push_str(&tp.text);
-                                        chunk_text.push_str("</thinking>");
-                                    }
-                                    crate::gemini::types::ResponsePart::FunctionCall(fc) => {
-                                        let args_str = serde_json::to_string(&fc.function_call.args)
-                                            .unwrap_or_else(|_| "{}".into());
-                                        chunk_tool_calls.push(crate::openai::types::ToolCallDelta {
-                                            index: 0,
-                                            id: Some(crate::openai::converter::generate_id()),
-                                            tool_type: Some("function".into()),
-                                            function: Some(crate::openai::types::FunctionCallDelta {
-                                                name: Some(fc.function_call.name.clone()),
-                                                arguments: Some(args_str),
-                                            }),
-                                        });
-                                    }
+                    let mut chunk_text = String::new();
+                    let mut chunk_tool_calls: Vec<crate::openai::types::ToolCallDelta> = Vec::new();
+                    if let Some(ref content) = candidate.content {
+                        for part in &content.parts {
+                            match part {
+                                crate::gemini::types::ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
+                                crate::gemini::types::ResponsePart::Thought(tp) => {
+                                    chunk_text.push_str("<thinking>");
+                                    chunk_text.push_str(&tp.text);
+                                    chunk_text.push_str("</thinking>");
                                 }
-                            }
-                        }
-
-                        let finish_reason = candidate.finish_reason.as_ref().map(|r| {
-                            crate::openai::converter::gemini_finish_reason(Some(r.clone()))
-                        });
-
-                        if !sent_initial && (!chunk_text.is_empty() || !chunk_tool_calls.is_empty()) {
-                            sent_initial = true;
-                            let initial = json!({
-                                "id": id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"role": "assistant", "content": ""},
-                                    "finish_reason": null
-                                }]
-                            });
-                            if let Ok(s) = serde_json::to_string(&initial) {
-                                let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
-                            }
-                        }
-
-                        if !chunk_text.is_empty() && chunk_text.len() > accumulated_text.len() {
-                            let delta: String = chunk_text
-                                .chars()
-                                .skip(accumulated_text.chars().count())
-                                .collect();
-                            accumulated_text = chunk_text;
-                            let chunk_json = json!({
-                                "id": id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"content": delta},
-                                    "finish_reason": null
-                                }]
-                            });
-                            if let Ok(s) = serde_json::to_string(&chunk_json) {
-                                let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
-                            }
-                        }
-
-                        if !chunk_tool_calls.is_empty() {
-                            let chunk_json = json!({
-                                "id": id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {"tool_calls": chunk_tool_calls},
-                                    "finish_reason": null
-                                }]
-                            });
-                            if let Ok(s) = serde_json::to_string(&chunk_json) {
-                                let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
-                            }
-                        }
-
-                        if finish_reason.is_some() {
-                            sent_finish = true;
-                            let finish_chunk = json!({
-                                "id": id,
-                                "object": "chat.completion.chunk",
-                                "created": created,
-                                "model": model,
-                                "choices": [{
-                                    "index": 0,
-                                    "delta": {},
-                                    "finish_reason": finish_reason.unwrap_or_else(|| "stop".into())
-                                }]
-                            });
-                            if let Ok(s) = serde_json::to_string(&finish_chunk) {
-                                let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+                                crate::gemini::types::ResponsePart::FunctionCall(fc) => {
+                                    let args_str = serde_json::to_string(&fc.function_call.args)
+                                        .unwrap_or_else(|_| "{}".into());
+                                    let key = (fc.function_call.name.clone(), args_str.clone());
+                                    let tool_id = tool_call_ids
+                                        .entry(key)
+                                        .or_insert_with(crate::openai::converter::generate_id)
+                                        .clone();
+                                    chunk_tool_calls.push(crate::openai::types::ToolCallDelta {
+                                        index: next_tool_index,
+                                        id: Some(tool_id),
+                                        tool_type: Some("function".into()),
+                                        function: Some(crate::openai::types::FunctionCallDelta {
+                                            name: Some(fc.function_call.name.clone()),
+                                            arguments: Some(args_str),
+                                        }),
+                                    });
+                                    next_tool_index += 1;
+                                }
                             }
                         }
                     }
-                } else if line.starts_with('[')
-                    && let Ok(parsed) = serde_json::from_str::<Value>(&line)
-                        && let Some(text) =
-                            crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
-                        {
-                            let gemini_chunk = GenerateContentResponse {
-                                candidates: vec![Candidate {
-                                    content: Some(ResponseContent {
-                                        role: "model".to_string(),
-                                        parts: vec![ResponsePart::Text(
-                                            TextResponsePart { text },
-                                        )],
-                                    }),
-                                    finish_reason: None,
-                                    index: 0,
-                                    safety_ratings: None,
-                                }],
-                                usage_metadata: None,
-                                model_version: None,
-                                response_id: None,
-                            };
 
-                            let candidate = match gemini_chunk.candidates.first() {
-                                Some(c) => c,
-                                None => continue,
-                            };
+                    let finish_reason = candidate.finish_reason.as_ref().map(|r| {
+                        crate::openai::converter::gemini_finish_reason(Some(r.clone()))
+                    });
 
-                            let mut chunk_text = String::new();
-                            let mut chunk_tool_calls: Vec<crate::openai::types::ToolCallDelta> = Vec::new();
-                            if let Some(ref content) = candidate.content {
-                                for part in &content.parts {
-                                    match part {
-                                        crate::gemini::types::ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
-                                        crate::gemini::types::ResponsePart::Thought(tp) => {
-                                            chunk_text.push_str("<thinking>");
-                                            chunk_text.push_str(&tp.text);
-                                            chunk_text.push_str("</thinking>");
-                                        }
-                                        crate::gemini::types::ResponsePart::FunctionCall(fc) => {
-                                            let args_str = serde_json::to_string(&fc.function_call.args)
-                                                .unwrap_or_else(|_| "{}".into());
-                                            chunk_tool_calls.push(crate::openai::types::ToolCallDelta {
-                                                index: 0,
-                                                id: Some(crate::openai::converter::generate_id()),
-                                                tool_type: Some("function".into()),
-                                                function: Some(crate::openai::types::FunctionCallDelta {
-                                                    name: Some(fc.function_call.name.clone()),
-                                                    arguments: Some(args_str),
-                                                }),
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-
-                            if !sent_initial && (!chunk_text.is_empty() || !chunk_tool_calls.is_empty()) {
-                                sent_initial = true;
-                                let initial = json!({
-                                    "id": id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {"role": "assistant", "content": ""},
-                                        "finish_reason": null
-                                    }]
-                                });
-                                if let Ok(s) = serde_json::to_string(&initial) {
-                                    let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
-                                }
-                            }
-
-                            if !chunk_text.is_empty() && chunk_text.len() > accumulated_text.len() {
-                                let delta: String = chunk_text
-                                    .chars()
-                                    .skip(accumulated_text.chars().count())
-                                    .collect();
-                                accumulated_text = chunk_text;
-                                let chunk_json = json!({
-                                    "id": id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {"content": delta},
-                                        "finish_reason": null
-                                    }]
-                                });
-                                if let Ok(s) = serde_json::to_string(&chunk_json) {
-                                    let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
-                                }
-                            }
-
-                            if !chunk_tool_calls.is_empty() {
-                                let chunk_json = json!({
-                                    "id": id,
-                                    "object": "chat.completion.chunk",
-                                    "created": created,
-                                    "model": model,
-                                    "choices": [{
-                                        "index": 0,
-                                        "delta": {"tool_calls": chunk_tool_calls},
-                                        "finish_reason": null
-                                    }]
-                                });
-                                if let Ok(s) = serde_json::to_string(&chunk_json) {
-                                    let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
-                                }
-                            }
+                    if !sent_initial && (!chunk_text.is_empty() || !chunk_tool_calls.is_empty()) {
+                        sent_initial = true;
+                        let initial = json!({
+                            "id": id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"role": "assistant", "content": ""},
+                                "finish_reason": null
+                            }]
+                        });
+                        if let Ok(s) = serde_json::to_string(&initial) {
+                            let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
                         }
+                    }
+
+                    if !chunk_text.is_empty() && chunk_text.len() > accumulated_text.len() {
+                        let delta: String = chunk_text
+                            .chars()
+                            .skip(accumulated_text.chars().count())
+                            .collect();
+                        accumulated_text = chunk_text;
+                        let chunk_json = json!({
+                            "id": id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"content": delta},
+                                "finish_reason": null
+                            }]
+                        });
+                        if let Ok(s) = serde_json::to_string(&chunk_json) {
+                            let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+                        }
+                    }
+
+                    if !chunk_tool_calls.is_empty() {
+                        let chunk_json = json!({
+                            "id": id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {"tool_calls": chunk_tool_calls},
+                                "finish_reason": null
+                            }]
+                        });
+                        if let Ok(s) = serde_json::to_string(&chunk_json) {
+                            let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+                        }
+                    }
+
+                    if finish_reason.is_some() {
+                        sent_finish = true;
+                        let finish_chunk = json!({
+                            "id": id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {},
+                                "finish_reason": finish_reason.unwrap_or_else(|| "stop".into())
+                            }]
+                        });
+                        if let Ok(s) = serde_json::to_string(&finish_chunk) {
+                            let _ = tx.send(Ok(format!("data: {s}\n\n"))).await;
+                        }
+                    }
                 }
+            }
         }
 
         if !sent_finish {
@@ -740,6 +609,58 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
 
     let response = axum::body::Body::from_stream(body_stream);
     (headers, response).into_response()
+}
+
+fn parse_sse_line(line: &str) -> Option<GenerateContentResponse> {
+    if let Some(data) = line.strip_prefix("data: ") {
+        if data == "[DONE]" {
+            return None;
+        }
+        return serde_json::from_str::<GenerateContentResponse>(data)
+            .ok()
+            .or_else(|| {
+                serde_json::from_str::<Value>(data)
+                    .ok()
+                    .and_then(|parsed| {
+                        crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
+                            .map(|text| GenerateContentResponse {
+                                candidates: vec![Candidate {
+                                    content: Some(ResponseContent {
+                                        role: "model".to_string(),
+                                        parts: vec![ResponsePart::Text(TextResponsePart { text })],
+                                    }),
+                                    finish_reason: None,
+                                    index: 0,
+                                    safety_ratings: None,
+                                }],
+                                usage_metadata: None,
+                                model_version: None,
+                                response_id: None,
+                            })
+                    })
+            });
+    }
+
+    if line.starts_with('[') {
+        if let Ok(parts) = crate::gemini::web_frontend::parse_response_parts(line) {
+            return Some(GenerateContentResponse {
+                candidates: vec![Candidate {
+                    content: Some(ResponseContent {
+                        role: "model".to_string(),
+                        parts,
+                    }),
+                    finish_reason: None,
+                    index: 0,
+                    safety_ratings: None,
+                }],
+                usage_metadata: None,
+                model_version: None,
+                response_id: None,
+            });
+        }
+    }
+
+    None
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
