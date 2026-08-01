@@ -1786,3 +1786,35 @@ mod parse_response_parts_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod xml_escape_tests {
+    use super::xml_escape;
+
+    #[test]
+    fn escapes_ampersand() {
+        assert_eq!(xml_escape("A & B"), "A &amp; B");
+    }
+
+    #[test]
+    fn escapes_angle_brackets() {
+        assert_eq!(xml_escape("<tag>"), "&lt;tag&gt;");
+    }
+
+    #[test]
+    fn escapes_quotes() {
+        assert_eq!(xml_escape("\"quoted\""), "&quot;quoted&quot;");
+    }
+
+    #[test]
+    fn escapes_combined_xml_payload() {
+        let input = r#"<tool name="foo&bar">"#;
+        let expected = "&lt;tool name=&quot;foo&amp;bar&quot;&gt;";
+        assert_eq!(xml_escape(input), expected);
+    }
+
+    #[test]
+    fn leaves_plain_text_unchanged() {
+        assert_eq!(xml_escape("plain text 123"), "plain text 123");
+    }
+}
