@@ -59,7 +59,11 @@ async fn messages(
             .gemini_client
             .stream_content(&model, &gemini_request)
             .await?;
-        Ok(build_anthropic_sse_response(response, &model))
+        Ok(build_anthropic_sse_response(
+            response,
+            &model,
+            state.gemini_client.clone(),
+        ))
     } else {
         let gemini_response = state
             .gemini_client
@@ -70,7 +74,11 @@ async fn messages(
     }
 }
 
-fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Response {
+fn build_anthropic_sse_response(
+    response: reqwest::Response,
+    model: &str,
+    gemini_client: GeminiClient,
+) -> Response {
     let stream = response.bytes_stream();
     let model = model.to_string();
     let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(64);
@@ -283,6 +291,10 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
         }
 
         let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+
+        // Update the shared web conversation state from the fully consumed
+        // response body.
+        gemini_client.update_conversation_state_from_body(&collected_body).await;
     });
 
     fn parse_sse_line(line: &str) -> Option<GenerateContentResponse> {

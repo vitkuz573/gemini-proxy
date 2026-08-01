@@ -141,7 +141,12 @@ async fn chat_completions(
             .gemini_client
             .stream_content(&model, &gemini_request)
             .await?;
-        Ok(build_sse_response(response, &model, include_usage))
+        Ok(build_sse_response(
+            response,
+            &model,
+            include_usage,
+            state.gemini_client.clone(),
+        ))
     } else {
         let gemini_response = state
             .gemini_client
@@ -181,7 +186,12 @@ async fn create_response(
             .gemini_client
             .stream_content(&model, &gemini_request)
             .await?;
-        Ok(build_responses_sse_response(response, &model, &request))
+        Ok(build_responses_sse_response(
+            response,
+            &model,
+            &request,
+            state.gemini_client.clone(),
+        ))
     } else {
         let gemini_response = state
             .gemini_client
@@ -200,6 +210,7 @@ fn build_responses_sse_response(
     response: reqwest::Response,
     model: &str,
     req: &CreateResponse,
+    _gemini_client: GeminiClient,
 ) -> Response {
     let stream = response.bytes_stream();
     let model = model.to_string();
@@ -356,6 +367,10 @@ fn build_responses_sse_response(
         }
 
         let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
+
+        // Update the shared web conversation state from the fully consumed
+        // response body.
+        _gemini_client.update_conversation_state_from_body(&collected_body).await;
     });
 
     let body_stream = ReceiverStream::new(rx).map(|result| match result {
@@ -373,7 +388,12 @@ fn build_responses_sse_response(
     (headers, response).into_response()
 }
 
-fn build_sse_response(response: reqwest::Response, model: &str, include_usage: bool) -> Response {
+fn build_sse_response(
+    response: reqwest::Response,
+    model: &str,
+    include_usage: bool,
+    gemini_client: GeminiClient,
+) -> Response {
     let stream = response.bytes_stream();
     let model = model.to_string();
     let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<String, Infallible>>(64);
@@ -575,6 +595,10 @@ fn build_sse_response(response: reqwest::Response, model: &str, include_usage: b
         let _ = tx
             .send(Ok("data: [DONE]\n\n".to_string()))
             .await;
+
+        // Update the shared web conversation state from the fully consumed
+        // response body.  In API-key mode there is no shared session to update.
+        gemini_client.update_conversation_state_from_body(&collected_body).await;
     });
 
     let body_stream = ReceiverStream::new(rx).map(|result| match result {
