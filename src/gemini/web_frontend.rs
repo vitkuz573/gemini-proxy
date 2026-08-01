@@ -1038,6 +1038,13 @@ fn is_attestation_error(body: &str) -> bool {
 /// to embed system instructions, prior turns, tool declarations, and thinking
 /// hints into the text itself.  The format uses explicit XML-style markers so
 /// the model can distinguish roles and structured data.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRequest) -> String {
     use crate::gemini::types::Part;
 
@@ -1055,7 +1062,7 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
             .collect::<Vec<_>>()
             .join("\n");
         if !text.is_empty() {
-            sections.push(format!("<system>\n{}\n</system>", text));
+            sections.push(format!("<system>\n{}\n</system>", xml_escape(&text)));
         }
     }
 
@@ -1080,8 +1087,8 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
                     .unwrap_or_else(|| "{}".to_string());
                 format!(
                     "<tool name=\"{}\" description=\"{}\">\n{}\n</tool>",
-                    d.name,
-                    d.description.as_deref().unwrap_or(""),
+                    xml_escape(&d.name),
+                    xml_escape(d.description.as_deref().unwrap_or("")),
                     params
                 )
             })
@@ -1112,16 +1119,16 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
                     .parts
                     .iter()
                     .map(|p| match p {
-                        Part::Text(t) => t.text.clone(),
+                        Part::Text(t) => xml_escape(&t.text),
                         Part::InlineData(_) => "[inline data]".to_string(),
                         Part::FunctionCall(fc) => format!(
                             "<function_call name=\"{}\">{}</function_call>",
-                            fc.function_call.name,
+                            xml_escape(&fc.function_call.name),
                             fc.function_call.args
                         ),
                         Part::FunctionResponse(fr) => format!(
                             "<function_response name=\"{}\">{}</function_response>",
-                            fr.function_response.name,
+                            xml_escape(&fr.function_response.name),
                             fr.function_response.response
                         ),
                     })
@@ -1137,16 +1144,16 @@ fn serialize_request_to_prompt(request: &crate::gemini::types::GenerateContentRe
             .parts
             .iter()
             .map(|p| match p {
-                Part::Text(t) => t.text.clone(),
+                Part::Text(t) => xml_escape(&t.text),
                 Part::InlineData(_) => "[inline data]".to_string(),
                 Part::FunctionCall(fc) => format!(
                     "<function_call name=\"{}\">{}</function_call>",
-                    fc.function_call.name,
+                    xml_escape(&fc.function_call.name),
                     fc.function_call.args
                 ),
                 Part::FunctionResponse(fr) => format!(
                     "<function_response name=\"{}\">{}</function_response>",
-                    fr.function_response.name,
+                    xml_escape(&fr.function_response.name),
                     fr.function_response.response
                 ),
             })
