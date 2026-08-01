@@ -210,11 +210,15 @@ fn build_responses_sse_response(
         let mut buffer = String::new();
         let mut stream = std::pin::pin!(stream);
         let mut accumulated_text = String::new();
+        let mut collected_body = String::new();
         let response_id = crate::openai::responses_converter::generate_response_id();
         let msg_id = crate::openai::responses_converter::generate_msg_id();
         let created_at = chrono::UTC::now().timestamp();
         let mut seq = 0u32;
         let mut sent_created = false;
+        let mut call_ids: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        let mut call_index: u32 = 0;
 
         while let Some(chunk_result) = stream.next().await {
             let bytes = match chunk_result {
@@ -226,6 +230,7 @@ fn build_responses_sse_response(
             };
 
             buffer.push_str(&String::from_utf8_lossy(&bytes));
+            collected_body.push_str(&String::from_utf8_lossy(&bytes));
 
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..newline_pos].trim().to_string();
@@ -235,53 +240,11 @@ fn build_responses_sse_response(
                     continue;
                 }
 
-                let data = if let Some(d) = line.strip_prefix("data: ") {
-                    if d == "[DONE]" {
-                        break;
-                    }
-                    d.to_string()
-                } else if line.starts_with('[') {
-                    line.clone()
-                } else {
-                    continue;
-                };
-
-                let gemini_chunk =
-                    match serde_json::from_str::<GenerateContentResponse>(&data) {
-                        Ok(c) => Some(c),
-                        Err(_) => {
-                            serde_json::from_str::<Value>(&data)
-                                .ok()
-                                .and_then(|parsed| {
-                                    crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
-                                        .map(|text| GenerateContentResponse {
-                                            candidates: vec![Candidate {
-                                                content: Some(ResponseContent {
-                                                    role: "model".to_string(),
-                                                    parts: vec![ResponsePart::Text(
-                                                        TextResponsePart { text },
-                                                    )],
-                                                }),
-                                                finish_reason: None,
-                                                index: 0,
-                                                safety_ratings: None,
-                                            }],
-                                            usage_metadata: None,
-                                            model_version: None,
-                                            response_id: None,
-                                        })
-                                })
-                        }
-                    };
+                let gemini_chunk = parse_sse_line(&line);
 
                 if let Some(chunk) = gemini_chunk {
-                    let candidate = match chunk.candidates.first() {
-                        Some(c) => c,
-                        None => continue,
-                    };
-
                     let mut chunk_text = String::new();
-                    if let Some(ref content) = candidate.content {
+                    if let Some(ref content) = chunk.candidates.first().and_then(|c| c.content.as_ref()) {
                         for part in &content.parts {
                             if let ResponsePart::Text(tp) = part {
                                 chunk_text.push_str(&tp.text);
@@ -289,7 +252,7 @@ fn build_responses_sse_response(
                         }
                     }
 
-                    if !sent_created && !chunk_text.is_empty() {
+                    if !sent_created && (!chunk_text.is_empty() || chunk.candidates.first().and_then(|c| c.content.as_ref()).map(|c| c.parts.iter().any(|p| matches!(p, ResponsePart::FunctionCall(_)))).unwrap_or(false)) {
                         sent_created = true;
                         let created_event = json!({
                             "type": "response.created",
@@ -329,7 +292,25 @@ fn build_responses_sse_response(
                         }
                     }
 
-                    if let Some(ref reason) = candidate.finish_reason {
+                    if let Some(events) = crate::openai::responses_converter::gemini_chunk_to_response_stream_event(
+                        &chunk, &model, seq, &mut call_ids, &mut call_index,
+                    ) {
+                        for event in events {
+                            if event.event_type == "response.function_call_arguments.delta" {
+                                seq += 1;
+                            }
+                            if let Ok(s) = serde_json::to_string(&event) {
+                                let event_name = match event.event_type.as_str() {
+                                    "response.output_text.delta" => "response.output_text.delta",
+                                    "response.function_call_arguments.delta" => "response.function_call_arguments.delta",
+                                    _ => &event.event_type,
+                                };
+                                let _ = tx.send(Ok(format!("event: {event_name}\ndata: {s}\n\n"))).await;
+                            }
+                        }
+                    }
+
+                    if let Some(reason) = chunk.candidates.first().and_then(|c| c.finish_reason.as_ref()) {
                         seq += 1;
                         let text_done = json!({
                             "type": "response.output_text.done",

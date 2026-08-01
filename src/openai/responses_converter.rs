@@ -372,12 +372,13 @@ pub fn gemini_chunk_to_response_stream_event(
     resp: &GenerateContentResponse,
     _model: &str,
     seq: u32,
+    call_ids: &mut std::collections::HashMap<(String, String), String>,
+    call_index: &mut u32,
 ) -> Option<Vec<ResponseStreamEvent>> {
     let candidate = resp.candidates.first()?;
 
     let mut events = Vec::new();
     let mut text = String::new();
-    let mut function_call = None;
 
     if let Some(ref content) = candidate.content {
         for part in &content.parts {
@@ -389,37 +390,46 @@ pub fn gemini_chunk_to_response_stream_event(
                     // Reasoning not streamed in detail
                 }
                 ResponsePart::FunctionCall(fc) => {
-                    function_call = Some(fc);
+                    let args_str =
+                        serde_json::to_string(&fc.function_call.args).unwrap_or_else(|_| "{}".into());
+                    let key = (fc.function_call.name.clone(), args_str.clone());
+                    let tool_id = call_ids
+                        .entry(key)
+                        .or_insert_with(generate_call_id)
+                        .clone();
+                    events.push(ResponseStreamEvent {
+                        event_type: "response.function_call_arguments.delta".into(),
+                        item_id: Some(tool_id),
+                        output_index: Some(0),
+                        content_index: Some(*call_index),
+                        delta: Some(args_str),
+                        sequence_number: Some(seq),
+                        text: None,
+                        response: None,
+                    });
+                    *call_index += 1;
                 }
             }
         }
     }
 
     if !text.is_empty() {
-        events.push(ResponseStreamEvent {
-            event_type: "response.output_text.delta".into(),
-            item_id: Some(format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))),
-            output_index: Some(0),
-            content_index: Some(0),
-            delta: Some(text),
-            sequence_number: Some(seq),
-            text: None,
-            response: None,
-        });
-    }
-
-    if let Some(fc) = function_call {
-        let args_str = serde_json::to_string(&fc.function_call.args).unwrap_or_else(|_| "{}".into());
-        events.push(ResponseStreamEvent {
-            event_type: "response.function_call_arguments.delta".into(),
-            item_id: Some(format!("call_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))),
-            output_index: Some(0),
-            content_index: None,
-            delta: Some(args_str),
-            sequence_number: Some(seq),
-            text: None,
-            response: None,
-        });
+        events.insert(
+            0,
+            ResponseStreamEvent {
+                event_type: "response.output_text.delta".into(),
+                item_id: Some(format!(
+                    "msg_{}",
+                    uuid::Uuid::new_v4().to_string().replace('-', "")
+                )),
+                output_index: Some(0),
+                content_index: Some(0),
+                delta: Some(text),
+                sequence_number: Some(seq),
+                text: None,
+                response: None,
+            },
+        );
     }
 
     if events.is_empty() {
