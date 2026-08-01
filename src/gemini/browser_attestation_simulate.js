@@ -38,6 +38,11 @@
   function findInput() {
     // Prefer the specific Quill editor that the Gemini UI currently uses.
     const selectors = [
+      '.initial-input-area textarea',
+      '.initial-input-area-container textarea',
+      'textarea[placeholder*="Ask"]',
+      'textarea[placeholder*="Prompt"]',
+      'textarea[placeholder*="anything"]',
       '.ql-editor[contenteditable="true"][aria-label*="prompt"]',
       '.ql-editor[contenteditable="true"]',
       '[data-test-id="textarea-inner"] rich-textarea [contenteditable="true"]',
@@ -65,6 +70,8 @@
 
   function findSendButton() {
     const selectors = [
+      '.initial-input-area .send-icon',
+      '.initial-input-area-container .send-icon',
       'button[aria-label*="Send"]',
       'button[aria-label*="send"]',
       'button[data-test-id="send-button"]',

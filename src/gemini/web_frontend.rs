@@ -25,22 +25,15 @@ const WEB_BASE_URL: &str = "https://gemini.google.com";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
-/// Conversation state extracted from a StreamGenerate response and replayed into
-/// the next request's inner_req_list[2] (field 3).
-///
-/// Live browser captures show the 10-element format:
-///   [conversationId, responseId, responsePartId, null, null, null, null, null, null, continuationToken]
-///
-/// - `conversation_id` (`c_...`) is returned in the main response payload at index [1][0].
-/// - `response_id` (`r_...`) is returned at main response [1][1] and in the meta entry [1][1].
-/// - `response_part_id` (`rc_...`) is the first element of the response part array (main [4][0][0]).
-/// - `continuation_token` comes from the small meta response entry at object key `"26"`.
+/// Raw payload captured from a headless browser.  The browser provides a
+/// complete, attestation-signed `inner_req_list` that the proxy can replay
+/// with only prompt/model overrides.
 #[derive(Debug, Clone)]
 pub struct BrowserAttestationPayload {
     pub inner_req_list: Vec<Value>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WebConversationState {
     pub conversation_id: String,
     pub response_id: String,
@@ -1555,10 +1548,20 @@ pub fn extract_conversation_state(body: &str) -> Result<WebConversationState> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let entry_arr = match entry.as_array() {
+        let mut entry_arr = match entry.as_array() {
             Some(a) => a,
             None => continue,
         };
+        // WIZ wraps each RPC entry in a one-element outer array, e.g.
+        //   [["wrb.fr", null, "..."]]
+        // Unwrap it so entry_arr is the actual [rpc_id, meta, payload] array.
+        if entry_arr.len() == 1 {
+            if let Some(inner) = entry_arr.first().and_then(|v| v.as_array()) {
+                entry_arr = inner;
+            } else {
+                continue;
+            }
+        }
         let rpc_id = match entry_arr.first().and_then(|v| v.as_str()) {
             Some(s) => s,
             None => continue,
@@ -1580,6 +1583,7 @@ pub fn extract_conversation_state(body: &str) -> Result<WebConversationState> {
         };
 
         // Meta entry: 3 elements, third is an object containing "26" token.
+        // Some first-turn responses put this on its own line.
         if payload_arr.len() == 3 {
             if let Some(obj) = payload_arr.get(2).and_then(|v| v.as_object())
                 && let Some(token) = obj.get("26").and_then(|v| v.as_str())

@@ -170,9 +170,38 @@ impl BrowserAttestationClient {
         if needs_reload {
             debug!(url = %nav_url, "Browser navigating to Gemini");
             conn.call("Page.navigate", json!({"url": nav_url})).await?;
-            wait_for_event(conn, "Page.loadEventFired", Duration::from_secs(30)).await?;
+            wait_for_event(conn, "Page.loadEventFired", Duration::from_secs(45)).await?;
             *loaded = conversation_id.map(|s| s.to_string());
         }
+
+        // Wait for the Angular app to boot and render the input area.  The
+        // SSR HTML contains styles but the interactive DOM is built by JS.
+        conn.call(
+            "Runtime.evaluate",
+            json!({
+                "expression": r#"
+                    new Promise((resolve) => {
+                        const deadline = Date.now() + 15000;
+                        const check = () => {
+                            const textarea = document.querySelector('.initial-input-area textarea, .initial-input-area-container textarea, textarea[placeholder*="Ask"], .ql-editor[contenteditable="true"]');
+                            if (textarea && textarea.offsetParent !== null) {
+                                resolve(true);
+                                return;
+                            }
+                            if (Date.now() < deadline) {
+                                setTimeout(check, 200);
+                            } else {
+                                resolve(false);
+                            }
+                        };
+                        check();
+                    })
+                "#,
+                "awaitPromise": true,
+                "returnByValue": true,
+            }),
+        )
+        .await?;
 
         // Inject cookies.  We do this after navigation so the page context is
         // ready.  Setting cookies before the first navigation also works, but
