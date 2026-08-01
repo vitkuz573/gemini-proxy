@@ -620,6 +620,7 @@ impl WebFrontendClient {
 
     /// Returns true if the request should be considered a new conversation.
     /// Used to decide whether to start a fresh browser page context.
+    #[allow(dead_code)]
     pub fn is_new_conversation(&self) -> bool {
         self.session.conversation_state.is_none()
     }
