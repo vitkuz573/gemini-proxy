@@ -36,6 +36,21 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
     let mut function_declarations: Vec<FunctionDeclaration> = Vec::new();
     let mut has_tool_config = false;
 
+    // Build a map from tool_call_id -> function_name by looking at preceding
+    // assistant tool_calls.  This lets us label tool responses with the correct
+    // function name even when the client omits the `name` field.
+    let mut tool_call_id_to_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for msg in &req.messages {
+        if msg.role == "assistant" {
+            if let Some(ref calls) = msg.tool_calls {
+                for tc in calls {
+                    tool_call_id_to_name.insert(tc.id.clone(), tc.function.name.clone());
+                }
+            }
+        }
+    }
+
     for msg in &req.messages {
         match msg.role.as_str() {
             "system" | "developer" => {
@@ -80,7 +95,9 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Result<GenerateC
             }
             "tool" => {
                 let tool_call_id = msg.tool_call_id.clone().unwrap_or_default();
-                let name = msg.name.clone().unwrap_or_else(|| {
+                let name = msg.name.clone().or_else(|| {
+                    tool_call_id_to_name.get(&tool_call_id).cloned()
+                }).unwrap_or_else(|| {
                     let response: serde_json::Value =
                         serde_json::from_str(msg.content.as_deref().unwrap_or("{}"))
                             .unwrap_or(serde_json::Value::Object(Default::default()));

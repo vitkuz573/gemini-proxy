@@ -54,11 +54,68 @@ pub fn anthropic_to_gemini_request(req: &MessagesRequest) -> Result<GenerateCont
         }
     }
 
+    // Build a map from tool_use_id -> function_name by looking at preceding
+    // assistant ToolUse blocks.  This lets us label ToolResult blocks with the
+    // correct function name even when the client omits it.
+    let mut tool_use_id_to_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for msg in &req.messages {
+        if msg.role == "assistant" {
+            if let MessageContent::Blocks(ref blocks) = msg.content {
+                for block in blocks {
+                    if let ContentBlock::ToolUse { id, name, .. } = block {
+                        tool_use_id_to_name.insert(id.clone(), name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     // Convert messages
     for msg in &req.messages {
         match msg.role.as_str() {
             "user" => {
-                let parts = convert_message_content_to_parts(&msg.content)?;
+                let mut parts = convert_message_content_to_parts(&msg.content)?;
+                if let MessageContent::Blocks(ref blocks) = msg.content {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            is_error,
+                        } = block
+                        {
+                            let response_value = match content {
+                                Some(ToolResultContent::Text(text)) => {
+                                    serde_json::json!({"result": text})
+                                }
+                                Some(ToolResultContent::Blocks(blocks)) => {
+                                    let mut result_parts = Vec::new();
+                                    for b in blocks {
+                                        if let ContentBlock::Text { text } = b {
+                                            result_parts.push(text.clone());
+                                        }
+                                    }
+                                    serde_json::json!({"result": result_parts.join(" ")})
+                                }
+                                None => serde_json::json!({}),
+                            };
+                            let name = tool_use_id_to_name
+                                .get(tool_use_id)
+                                .cloned()
+                                .unwrap_or_else(|| tool_use_id.clone());
+                            parts.push(Part::FunctionResponse(FunctionResponsePart {
+                                function_response: FunctionResponse {
+                                    name,
+                                    response: if is_error.unwrap_or(false) {
+                                        serde_json::json!({"error": response_value})
+                                    } else {
+                                        response_value
+                                    },
+                                },
+                            }));
+                        }
+                    }
+                }
                 contents.push(Content {
                     role: "user".into(),
                     parts,
@@ -204,38 +261,10 @@ fn convert_message_content_to_parts(content: &MessageContent) -> Result<Vec<Part
                             },
                         }));
                     }
-                    ContentBlock::ToolResult {
-                        tool_use_id,
-                        content,
-                        is_error,
-                    } => {
-                        let response_value = match content {
-                            Some(ToolResultContent::Text(text)) => {
-                                serde_json::json!({"result": text})
-                            }
-                            Some(ToolResultContent::Blocks(blocks)) => {
-                                let mut result_parts = Vec::new();
-                                for block in blocks {
-                                    if let ContentBlock::Text { text } = block {
-                                        result_parts.push(text.clone());
-                                    }
-                                }
-                                serde_json::json!({"result": result_parts.join(" ")})
-                            }
-                            None => serde_json::json!({}),
-                        };
-
-                        let name = tool_use_id.clone();
-                        parts.push(Part::FunctionResponse(FunctionResponsePart {
-                            function_response: FunctionResponse {
-                                name,
-                                response: if is_error.unwrap_or(false) {
-                                    serde_json::json!({"error": response_value})
-                                } else {
-                                    response_value
-                                },
-                            },
-                        }));
+                    ContentBlock::ToolResult { .. } => {
+                        // ToolResult blocks are handled at the message level so
+                        // we can resolve the function name from prior assistant
+                        // ToolUse blocks.
                     }
                     ContentBlock::Thinking { .. } => {
                         // Thinking blocks from user are ignored
