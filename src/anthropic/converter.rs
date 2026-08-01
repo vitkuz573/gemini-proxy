@@ -12,6 +12,10 @@ pub fn generate_msg_id() -> String {
     format!("msg_{}", Uuid::new_v4().to_string().replace('-', ""))
 }
 
+pub fn generate_tool_id() -> String {
+    format!("toolu_{}", Uuid::new_v4().to_string().replace('-', ""))
+}
+
 pub fn map_gemini_finish_reason(reason: Option<String>) -> String {
     match reason.as_deref() {
         Some("STOP") => "end_turn".into(),

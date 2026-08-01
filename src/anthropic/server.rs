@@ -79,10 +79,14 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
         let mut buffer = String::new();
         let mut stream = std::pin::pin!(stream);
         let mut accumulated_text = String::new();
+        let mut collected_body = String::new();
         let msg_id = crate::anthropic::converter::generate_msg_id();
         let mut sent_message_start = false;
         let mut sent_content_block_start = false;
         let content_block_index = 0;
+        let mut tool_use_ids: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        let mut tool_use_index: u32 = 0;
 
         while let Some(chunk_result) = stream.next().await {
             let bytes = match chunk_result {
@@ -94,6 +98,7 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
             };
 
             buffer.push_str(&String::from_utf8_lossy(&bytes));
+            collected_body.push_str(&String::from_utf8_lossy(&bytes));
 
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..newline_pos].trim().to_string();
@@ -103,41 +108,7 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
                     continue;
                 }
 
-                let data = if let Some(d) = line.strip_prefix("data: ") {
-                    if d == "[DONE]" {
-                        break;
-                    }
-                    d.to_string()
-                } else {
-                    continue;
-                };
-
-                let gemini_chunk = match serde_json::from_str::<GenerateContentResponse>(&data) {
-                    Ok(c) => Some(c),
-                    Err(_) => {
-                        serde_json::from_str::<Value>(&data)
-                            .ok()
-                            .and_then(|parsed| {
-                                crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
-                                    .map(|text| GenerateContentResponse {
-                                        candidates: vec![Candidate {
-                                            content: Some(ResponseContent {
-                                                role: "model".to_string(),
-                                                parts: vec![ResponsePart::Text(
-                                                    TextResponsePart { text },
-                                                )],
-                                            }),
-                                            finish_reason: None,
-                                            index: 0,
-                                            safety_ratings: None,
-                                        }],
-                                        usage_metadata: None,
-                                        model_version: None,
-                                        response_id: None,
-                                    })
-                            })
-                    }
-                };
+                let gemini_chunk = parse_sse_line(&line);
 
                 if let Some(chunk) = gemini_chunk {
                     let candidate = match chunk.candidates.first() {
@@ -147,21 +118,28 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
 
                     let mut chunk_text = String::new();
                     let mut chunk_thinking = String::new();
-                    let mut chunk_tool_use: Vec<(String, serde_json::Value)> = Vec::new();
+                    let mut chunk_tool_use: Vec<(String, serde_json::Value, String)> = Vec::new();
                     if let Some(ref content) = candidate.content {
                         for part in &content.parts {
                             match part {
                                 ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
                                 ResponsePart::Thought(tp) => chunk_thinking.push_str(&tp.text),
                                 ResponsePart::FunctionCall(fc) => {
-                                    chunk_tool_use.push((fc.function_call.name.clone(), fc.function_call.args.clone()));
+                                    let args_str = serde_json::to_string(&fc.function_call.args)
+                                        .unwrap_or_else(|_| "{}".into());
+                                    let key = (fc.function_call.name.clone(), args_str.clone());
+                                    let tool_id = tool_use_ids
+                                        .entry(key)
+                                        .or_insert_with(crate::anthropic::converter::generate_tool_id)
+                                        .clone();
+                                    chunk_tool_use.push((fc.function_call.name.clone(), fc.function_call.args.clone(), tool_id));
                                 }
                             }
                         }
                     }
 
                     // Send message_start event
-                    if !sent_message_start {
+                    if !sent_message_start && (!chunk_text.is_empty() || !chunk_thinking.is_empty() || !chunk_tool_use.is_empty()) {
                         sent_message_start = true;
                         let message_start = json!({
                             "type": "message_start",
@@ -233,16 +211,19 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
                     }
 
                     if !chunk_tool_use.is_empty() {
-                        for (name, input) in chunk_tool_use {
+                        for (name, input, tool_id) in chunk_tool_use {
                             let tool_event = json!({
                                 "type": "content_block_delta",
                                 "index": content_block_index,
                                 "delta": {
                                     "type": "tool_use_delta",
+                                    "id": tool_id,
+                                    "index": tool_use_index,
                                     "name": name,
                                     "input": input
                                 }
                             });
+                            tool_use_index += 1;
                             if let Ok(s) = serde_json::to_string(&tool_event) {
                                 let _ = tx.send(Ok(format!("event: content_block_delta\ndata: {s}\n\n"))).await;
                             }
@@ -303,6 +284,58 @@ fn build_anthropic_sse_response(response: reqwest::Response, model: &str) -> Res
 
         let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
     });
+
+    fn parse_sse_line(line: &str) -> Option<GenerateContentResponse> {
+        if let Some(data) = line.strip_prefix("data: ") {
+            if data == "[DONE]" {
+                return None;
+            }
+            return serde_json::from_str::<GenerateContentResponse>(data)
+                .ok()
+                .or_else(|| {
+                    serde_json::from_str::<Value>(data)
+                        .ok()
+                        .and_then(|parsed| {
+                            crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
+                                .map(|text| GenerateContentResponse {
+                                    candidates: vec![Candidate {
+                                        content: Some(ResponseContent {
+                                            role: "model".to_string(),
+                                            parts: vec![ResponsePart::Text(TextResponsePart { text })],
+                                        }),
+                                        finish_reason: None,
+                                        index: 0,
+                                        safety_ratings: None,
+                                    }],
+                                    usage_metadata: None,
+                                    model_version: None,
+                                    response_id: None,
+                                })
+                        })
+                });
+        }
+
+        if line.starts_with('[') {
+            if let Ok(parts) = crate::gemini::web_frontend::parse_response_parts(line) {
+                return Some(GenerateContentResponse {
+                    candidates: vec![Candidate {
+                        content: Some(ResponseContent {
+                            role: "model".to_string(),
+                            parts,
+                        }),
+                        finish_reason: None,
+                        index: 0,
+                        safety_ratings: None,
+                    }],
+                    usage_metadata: None,
+                    model_version: None,
+                    response_id: None,
+                });
+            }
+        }
+
+        None
+    }
 
     let body_stream = ReceiverStream::new(rx).map(|result| match result {
         Ok(s) => Ok::<_, Infallible>(s.into_bytes()),
