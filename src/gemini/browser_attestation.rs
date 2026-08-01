@@ -43,6 +43,9 @@ pub struct BrowserAttestationClient {
     /// The conversation id currently loaded in the browser page.  When it
     /// changes we reload the page so the browser starts a fresh conversation.
     loaded_conversation_id: Mutex<Option<String>>,
+    /// Unique temporary user-data-dir for this client instance.  Kept so we can
+    /// clean it up on drop/close.
+    user_data_dir: std::path::PathBuf,
 }
 
 impl BrowserAttestationClient {
@@ -50,11 +53,14 @@ impl BrowserAttestationClient {
     /// Chromium/Chrome executable.  The browser process is not started until the
     /// first call to `get_stream_generate_payload`.
     pub fn new(chrome_path: String) -> Self {
+        let user_data_dir = std::env::temp_dir()
+            .join(format!("gemini-proxy-chrome-data-{}", uuid::Uuid::new_v4()));
         Self {
             chrome_path,
             process: Mutex::new(None),
             conn: Mutex::new(None),
             loaded_conversation_id: Mutex::new(None),
+            user_data_dir,
         }
     }
 
@@ -71,6 +77,7 @@ impl BrowserAttestationClient {
                     let _ = child.kill().await;
                     *proc_guard = None;
                     *conn_guard = None;
+                    *self.loaded_conversation_id.lock().await = None;
                 }
                 Ok(None) => {
                     if conn_guard.is_some() {
@@ -79,6 +86,7 @@ impl BrowserAttestationClient {
                     // Process alive but no connection; kill and reconnect.
                     let _ = child.kill().await;
                     *proc_guard = None;
+                    *self.loaded_conversation_id.lock().await = None;
                 }
                 Err(e) => {
                     return Err(ProxyError::Config(format!(
@@ -88,7 +96,7 @@ impl BrowserAttestationClient {
             }
         }
 
-        let (child, browser_ws_url) = launch_chrome(&self.chrome_path).await?;
+        let (child, browser_ws_url) = launch_chrome(&self.chrome_path, &self.user_data_dir).await?;
 
         // The DevTools URL printed by Chrome is a *browser* target.  We must
         // create and attach to a page target before we can navigate and
@@ -110,12 +118,15 @@ impl BrowserAttestationClient {
     pub async fn close(&self) {
         let mut conn = self.conn.lock().await;
         *conn = None;
+        *self.loaded_conversation_id.lock().await = None;
         let mut proc = self.process.lock().await;
         if let Some(mut child) = proc.take() {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
+        let _ = tokio::fs::remove_dir_all(&self.user_data_dir).await;
     }
+
 
     /// Obtain a fresh StreamGenerate payload for `prompt`.
     ///
@@ -198,7 +209,12 @@ impl BrowserAttestationClient {
         let mut events = conn.subscribe();
 
         // Simulate the user typing the prompt and pressing Enter.
-        let escaped_prompt = prompt.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        let escaped_prompt = prompt
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
         let simulate_js = include_str!("browser_attestation_simulate.js");
         let simulate_js = simulate_js.replace("__PROMPT__", &escaped_prompt);
         let eval_res = conn
@@ -258,7 +274,10 @@ impl BrowserAttestationClient {
 
 
 /// Launch Chrome and return the child process plus the DevTools WebSocket URL.
-async fn launch_chrome(chrome_path: &str) -> Result<(TokioChild, String)> {
+async fn launch_chrome(
+    chrome_path: &str,
+    user_data_dir: &std::path::Path,
+) -> Result<(TokioChild, String)> {
     let mut child = TokioCommand::new(chrome_path)
         .arg("--headless")
         .arg("--disable-gpu")
@@ -269,7 +288,7 @@ async fn launch_chrome(chrome_path: &str) -> Result<(TokioChild, String)> {
         .arg("--disable-renderer-backgrounding")
         .arg("--disable-features=TranslateUI")
         .arg("--remote-debugging-port=0")
-        .arg("--user-data-dir=/tmp/gemini-proxy-chrome-data")
+        .arg(format!("--user-data-dir={}", user_data_dir.display()))
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -435,22 +454,41 @@ async fn wait_for_stream_generate_request(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ProxyError::Internal("CDP requestId missing".into()))?;
 
-            // getRequestPostData may not be available immediately; wait a tick
-            // for the request body to be captured.
-            tokio::time::sleep(Duration::from_millis(200)).await;
-
-            // Verify post data is available before returning.
-            match conn
-                .call("Network.getRequestPostData", json!({"requestId": request_id}))
-                .await
-            {
-                Ok(data) => {
-                    if data.get("postData").is_some() {
-                        return Ok(request_id.to_string());
+            // Post data may not be available immediately.  Wait for the
+            // request to finish loading, then retry getRequestPostData without
+            // consuming the matched event until the body is present.
+            let mut post_data_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                match conn
+                    .call("Network.getRequestPostData", json!({"requestId": request_id}))
+                    .await
+                {
+                    Ok(data) => {
+                        if data.get("postData").is_some() {
+                            return Ok(request_id.to_string());
+                        }
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "Post data not yet available, retrying");
                     }
                 }
-                Err(e) => {
-                    debug!(error = %e, "Post data not yet available, continuing to wait");
+
+                // Wait for the request to finish, or a short poll interval.
+                let remaining = post_data_deadline - tokio::time::Instant::now();
+                if remaining.is_zero() {
+                    break;
+                }
+                match timeout(remaining, events.recv()).await {
+                    Ok(Ok(m)) => {
+                        if m.get("method").and_then(|v| v.as_str())
+                            == Some("Network.loadingFinished")
+                        {
+                            post_data_deadline =
+                                tokio::time::Instant::now() + Duration::from_millis(500);
+                        }
+                    }
+                    Ok(Err(_)) => break,
+                    Err(_) => break,
                 }
             }
         }

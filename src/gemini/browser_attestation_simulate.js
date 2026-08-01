@@ -1,4 +1,4 @@
-(function () {
+(async function () {
   const prompt = "__PROMPT__";
 
   function findInput() {
@@ -70,7 +70,20 @@
   const input = findInput();
   if (!input) return false;
 
+  // Wait until the input is focusable/visible.
+  const isVisible = (el) => {
+    const rect = el.getBoundingClientRect && el.getBoundingClientRect();
+    return rect && rect.width > 0 && rect.height > 0;
+  };
+  let attempts = 0;
+  while ((!input.offsetParent || !isVisible(input)) && attempts < 50) {
+    await new Promise((r) => setTimeout(r, 100));
+    attempts++;
+  }
+  if (!input.offsetParent || !isVisible(input)) return false;
+
   input.focus();
+  input.click();
   setValue(input, prompt);
   dispatch(input, 'input', { inputType: 'insertText' });
   dispatch(input, 'change');
