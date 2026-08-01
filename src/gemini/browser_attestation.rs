@@ -140,6 +140,20 @@ impl BrowserAttestationClient {
         prompt: &str,
         conversation_id: Option<&str>,
     ) -> Result<BrowserAttestationPayload> {
+        self.get_stream_generate_payload_with_image(cookies, prompt, conversation_id, None)
+            .await
+    }
+
+    /// Capture a StreamGenerate payload, optionally by attaching a local image
+    /// file to the prompt. This is used to reverse-engineer how the Gemini web
+    /// frontend represents images/files in slot 0 and any side-channel headers.
+    pub async fn get_stream_generate_payload_with_image(
+        &self,
+        cookies: &HashMap<String, String>,
+        prompt: &str,
+        conversation_id: Option<&str>,
+        image_path: Option<&str>,
+    ) -> Result<BrowserAttestationPayload> {
         self.ensure_running().await?;
 
         let conn = self.conn.lock().await;
@@ -208,15 +222,22 @@ impl BrowserAttestationClient {
         // do not miss the StreamGenerate request.
         let mut events = conn.subscribe();
 
-        // Simulate the user typing the prompt and pressing Enter.
-        let escaped_prompt = prompt
-            .replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "\\r")
-            .replace('\t', "\\t");
-        let simulate_js = include_str!("browser_attestation_simulate.js");
-        let simulate_js = simulate_js.replace("__PROMPT__", &escaped_prompt);
+        let simulate_js = if let Some(image) = image_path {
+            // For file:// URLs the browser must be allowed to read them; we
+            // copy the image into the user-data-dir and reference it there.
+            let allowed_path = self.copy_image_to_user_data_dir(image).await?;
+            let allowed_path_str = allowed_path.to_string_lossy();
+            let mut js = include_str!("browser_attestation_simulate_image.js").to_string();
+            js = js.replace("__IMAGE_PATH__", &allowed_path_str.replace('\\', "/"));
+            js = js.replace("__PROMPT__", &json_string_escape(prompt));
+            js
+        } else {
+            let escaped_prompt = json_string_escape(prompt);
+            let mut js = include_str!("browser_attestation_simulate.js").to_string();
+            js = js.replace("__PROMPT__", &escaped_prompt);
+            js
+        };
+
         let eval_res = conn
             .call(
                 "Runtime.evaluate",
@@ -242,20 +263,40 @@ impl BrowserAttestationClient {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if !sim_ok {
-            return Err(ProxyError::GeminiApi(
-                "Browser could not find the Gemini input element".into(),
-            ));
+            // Retrieve client-side logs so failures are diagnosable.
+            let logs = conn
+                .call(
+                    "Runtime.evaluate",
+                    json!({
+                        "expression": "(typeof __geminiSimLogs !== 'undefined') ? JSON.stringify(__geminiSimLogs) : '[]'",
+                        "returnByValue": true,
+                    }),
+                )
+                .await;
+            let log_text = match logs {
+                Ok(v) => v
+                    .get("result")
+                    .and_then(|r| r.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[]")
+                    .to_string(),
+                Err(_) => "[]".to_string(),
+            };
+            error!(logs = %log_text, "Browser could not find the Gemini input element");
+            return Err(ProxyError::GeminiApi(format!(
+                "Browser could not find the Gemini input element. JS logs: {log_text}"
+            )));
         }
 
         // Wait for the StreamGenerate request.
         let request_id = wait_for_stream_generate_request(&mut events, conn).await?;
         drop(events);
 
-        // Fetch the request post data.
-        let post_data = conn
+        // Fetch request details so we can inspect headers too.
+        let request_data = conn
             .call("Network.getRequestPostData", json!({"requestId": request_id}))
             .await?;
-        let body_str = post_data
+        let body_str = request_data
             .get("postData")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ProxyError::GeminiApi("StreamGenerate body missing".into()))?;
@@ -269,6 +310,29 @@ impl BrowserAttestationClient {
 
         Ok(BrowserAttestationPayload { inner_req_list })
     }
+
+    /// Copy an image from the host filesystem into the browser profile directory
+    /// so the headless page can read it via file://.
+    async fn copy_image_to_user_data_dir(&self, src: &str) -> Result<std::path::PathBuf> {
+        let src_path = std::path::Path::new(src);
+        if !src_path.exists() {
+            return Err(ProxyError::Config(format!("Image not found: {src}")));
+        }
+        let dest = self.user_data_dir.join("upload.png");
+        tokio::fs::copy(src_path, &dest)
+            .await
+            .map_err(|e| ProxyError::Config(format!("Failed to copy image for browser: {e}")))?;
+        Ok(dest)
+    }
+}
+
+/// Escape a string for safe insertion into a double-quoted JS string literal.
+fn json_string_escape(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 
