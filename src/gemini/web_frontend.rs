@@ -877,7 +877,9 @@ fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
 /// - slot 4  -> field 5  -> attestation uuid (Jjb) - optional/empty
 /// - slot 17 -> field 18 -> turn counter ([[0]] first turn, [[1]] subsequent)
 /// - slot 30 -> field 31 -> mode category enum
-/// - slot 33 -> field 34  -> system instruction (AE submessage)
+/// - slot 33 -> field 34 -> system instruction (AE submessage) - **rejected
+///   by live Gemini with HTTP 400 when set by the proxy**, so the proxy falls
+///   back to prepending the system instruction into the user prompt text.
 /// - slot 53 -> field 54 -> unknown boolean
 /// - slot 59 -> field 60 -> client request uuid
 /// - slot 61 -> field 62 -> unknown empty array
