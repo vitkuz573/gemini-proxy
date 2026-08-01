@@ -226,7 +226,9 @@ impl GeminiClient {
             }
         };
 
-        let response_text = web_client.generate_content(&mode_id, category_enum, request).await?;
+        let response_text = web_client
+            .generate_content(&mode_id, category_enum, request, self.max_retries)
+            .await?;
 
         {
             let mut session_guard = self.web_session.lock().await;
@@ -272,7 +274,9 @@ impl GeminiClient {
                 WebFrontendClient::new_with_browser_path(self.auth.cookies.clone(), None)?
             }
         };
-        let response = web_client.stream_generate(&mode_id, category_enum, request).await?;
+        let response = web_client
+            .stream_generate(&mode_id, category_enum, request, self.max_retries)
+            .await?;
         {
             let mut session_guard = self.web_session.lock().await;
             *session_guard = Some(web_client.session().clone());
@@ -284,11 +288,16 @@ impl GeminiClient {
     /// response body.  Called by streaming endpoints after the upstream body has
     /// been read to completion.
     pub async fn update_conversation_state_from_body(&self, body: &str) {
-        if let Some(state) = super::web_frontend::extract_conversation_state(body) {
-            let mut guard = self.web_session.lock().await;
-            if let Some(ref mut session) = *guard {
-                debug!(?state, "Updating conversation state from streamed response");
-                session.conversation_state = Some(state);
+        match super::web_frontend::extract_conversation_state(body) {
+            Ok(state) => {
+                let mut guard = self.web_session.lock().await;
+                if let Some(ref mut session) = *guard {
+                    debug!(?state, "Updating conversation state from streamed response");
+                    session.conversation_state = Some(state);
+                }
+            }
+            Err(e) => {
+                debug!(error = %e, "failed to extract conversation state from streamed response");
             }
         }
     }

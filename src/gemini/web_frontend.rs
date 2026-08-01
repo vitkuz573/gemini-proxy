@@ -380,6 +380,7 @@ impl WebFrontendClient {
         mode_id: &str,
         category_enum: u64,
         request: &crate::gemini::types::GenerateContentRequest,
+        max_retries: u32,
     ) -> Result<String> {
         if self.session.access_token.is_none() && self.session.build_label.is_none() {
             self.init_session().await?;
@@ -434,20 +435,29 @@ impl WebFrontendClient {
 
         debug!(mode_id, category_enum, used_browser, "Sending request to web frontend");
 
-        let mut req = self.client.post(&url)
-            .query(&params)
-            .body(body);
-
-        for (key, value) in &headers {
-            req = req.header(key.as_str(), value.as_str());
-        }
-
-        req = req.header("Cookie", self.build_cookie_header());
-
-        let response = req
-            .send()
-            .await
-            .map_err(|e| ProxyError::GeminiApi(format!("Web frontend request failed: {e}")))?;
+        let client = self.client.clone();
+        let cookie_header = self.build_cookie_header();
+        let response = crate::retry::send_retryable_request(max_retries, move || {
+            let client = client.clone();
+            let url = url.clone();
+            let params = params.clone();
+            let body = body.clone();
+            let headers = headers.clone();
+            let cookie_header = cookie_header.clone();
+            async move {
+                let mut req = client.post(&url).query(&params).body(body);
+                for (key, value) in &headers {
+                    req = req.header(key.as_str(), value.as_str());
+                }
+                req = req.header("Cookie", cookie_header);
+                req.send().await
+            }
+        })
+        .await
+        .map_err(|e| match e {
+            ProxyError::RateLimited(msg) => ProxyError::RateLimited(msg),
+            _ => ProxyError::GeminiApi(format!("Web frontend request failed: {e}")),
+        })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -474,9 +484,14 @@ impl WebFrontendClient {
 
         // Extract conversation state for the next turn.  Even if this fails we
         // still return the body so the current response can be parsed.
-        if let Some(state) = extract_conversation_state(&body) {
-            debug!(?state, "extracted conversation state");
-            self.session.conversation_state = Some(state);
+        match extract_conversation_state(&body) {
+            Ok(state) => {
+                debug!(?state, "extracted conversation state");
+                self.session.conversation_state = Some(state);
+            }
+            Err(e) => {
+                debug!(error = %e, "failed to extract conversation state");
+            }
         }
 
         // Return the raw response body so callers can parse structured parts
@@ -489,6 +504,7 @@ impl WebFrontendClient {
         mode_id: &str,
         category_enum: u64,
         request: &crate::gemini::types::GenerateContentRequest,
+        max_retries: u32,
     ) -> Result<reqwest::Response> {
         if self.session.access_token.is_none() && self.session.build_label.is_none() {
             self.init_session().await?;
@@ -543,20 +559,29 @@ impl WebFrontendClient {
 
         debug!(mode_id, category_enum, used_browser, "Sending streaming request to web frontend");
 
-        let mut req = self.client.post(&url)
-            .query(&params)
-            .body(body);
-
-        for (key, value) in &headers {
-            req = req.header(key.as_str(), value.as_str());
-        }
-
-        req = req.header("Cookie", self.build_cookie_header());
-
-        let response = req
-            .send()
-            .await
-            .map_err(|e| ProxyError::GeminiApi(format!("Web frontend streaming request failed: {e}")))?;
+        let client = self.client.clone();
+        let cookie_header = self.build_cookie_header();
+        let response = crate::retry::send_retryable_request(max_retries, move || {
+            let client = client.clone();
+            let url = url.clone();
+            let params = params.clone();
+            let body = body.clone();
+            let headers = headers.clone();
+            let cookie_header = cookie_header.clone();
+            async move {
+                let mut req = client.post(&url).query(&params).body(body);
+                for (key, value) in &headers {
+                    req = req.header(key.as_str(), value.as_str());
+                }
+                req = req.header("Cookie", cookie_header);
+                req.send().await
+            }
+        })
+        .await
+        .map_err(|e| match e {
+            ProxyError::RateLimited(msg) => ProxyError::RateLimited(msg),
+            _ => ProxyError::GeminiApi(format!("Web frontend streaming request failed: {e}")),
+        })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -1254,7 +1279,7 @@ fn extract_session_id(body: &str) -> Option<String> {
 ///   response parts;
 /// - the small meta entry (`["wrb.fr", null, "[null,[null,<r_id>],{\"26\":<token>,...}]"]`) which
 ///   carries the continuation token at key `"26"`.
-pub fn extract_conversation_state(body: &str) -> Option<WebConversationState> {
+pub fn extract_conversation_state(body: &str) -> Result<WebConversationState> {
     let mut main_entry: Option<Value> = None;
     let mut continuation_token: Option<String> = None;
 
@@ -1263,15 +1288,33 @@ pub fn extract_conversation_state(body: &str) -> Option<WebConversationState> {
         if line.is_empty() || line.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
             continue;
         }
-        let entry: Value = serde_json::from_str(line).ok()?;
-        let entry_arr = entry.as_array()?;
-        let rpc_id = entry_arr.first().and_then(|v| v.as_str())?;
+        let entry: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let entry_arr = match entry.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
+        let rpc_id = match entry_arr.first().and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
         if rpc_id != "wrb.fr" {
             continue;
         }
-        let payload_str = entry_arr.get(2).and_then(|v| v.as_str())?;
-        let payload: Value = serde_json::from_str(payload_str).ok()?;
-        let payload_arr = payload.as_array()?;
+        let payload_str = match entry_arr.get(2).and_then(|v| v.as_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        let payload: Value = match serde_json::from_str(payload_str) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let payload_arr = match payload.as_array() {
+            Some(a) => a,
+            None => continue,
+        };
 
         // Meta entry: 3 elements, third is an object containing "26" token.
         if payload_arr.len() == 3 {
@@ -1289,21 +1332,43 @@ pub fn extract_conversation_state(body: &str) -> Option<WebConversationState> {
         }
     }
 
-    let main = main_entry?;
-    let main_arr = main.as_array()?;
+    let main = main_entry.ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate response missing main entry".into())
+    })?;
+    let main_arr = main.as_array().ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate main entry is not an array".into())
+    })?;
 
-    let ids = main_arr.get(1).and_then(|v| v.as_array())?;
-    let conversation_id = ids.first().and_then(|v| v.as_str())?.to_string();
-    let response_id = ids.get(1).and_then(|v| v.as_str())?.to_string();
+    let ids = main_arr.get(1).and_then(|v| v.as_array()).ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate response missing conversation ids".into())
+    })?;
+    let conversation_id = ids.first().and_then(|v| v.as_str()).ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate response missing conversation_id".into())
+    })?;
+    let response_id = ids.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate response missing response_id".into())
+    })?;
 
-    let parts = main_arr.get(4).and_then(|v| v.as_array())?;
-    let first_part = parts.first().and_then(|v| v.as_array())?;
-    let response_part_id = first_part.first().and_then(|v| v.as_str())?.to_string();
+    let parts = main_arr.get(4).and_then(|v| v.as_array()).ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate response missing parts array".into())
+    })?;
+    let first_part = parts.first().and_then(|v| v.as_array()).ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate response missing first part".into())
+    })?;
+    let response_part_id = first_part.first().and_then(|v| v.as_str()).ok_or_else(|| {
+        ProxyError::GeminiApi("StreamGenerate response missing response_part_id".into())
+    })?;
 
-    Some(WebConversationState {
-        conversation_id,
-        response_id,
-        response_part_id,
+    if continuation_token.is_none() {
+        return Err(ProxyError::GeminiApi(
+            "StreamGenerate response missing continuation token; cannot continue conversation".into(),
+        ));
+    }
+
+    Ok(WebConversationState {
+        conversation_id: conversation_id.to_string(),
+        response_id: response_id.to_string(),
+        response_part_id: response_part_id.to_string(),
         continuation_token: continuation_token.unwrap_or_default(),
     })
 }
