@@ -314,7 +314,7 @@ impl GeminiClient {
 
         debug!(model, "sending generateContent request");
 
-        let response = crate::retry::send_retryable_request(self.max_retries, move || {
+        let response = crate::retry::send_retryable_request(self.max_retries as usize, move || {
             let client = client.clone();
             let url = url.clone();
             let request = request.clone();
@@ -348,7 +348,7 @@ impl GeminiClient {
 
         debug!(model, "sending streamGenerateContent request");
 
-        let response = crate::retry::send_retryable_request(max_retries, move || {
+        let response = crate::retry::send_retryable_request(max_retries as usize, move || {
             let client = client.clone();
             let url = url.clone();
             let request = request.clone();

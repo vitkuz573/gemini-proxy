@@ -437,7 +437,7 @@ impl WebFrontendClient {
 
         let client = self.client.clone();
         let cookie_header = self.build_cookie_header();
-        let response = crate::retry::send_retryable_request(max_retries, move || {
+        let response = crate::retry::send_retryable_request(max_retries as usize, move || {
             let client = client.clone();
             let url = url.clone();
             let params = params.clone();
@@ -561,7 +561,7 @@ impl WebFrontendClient {
 
         let client = self.client.clone();
         let cookie_header = self.build_cookie_header();
-        let response = crate::retry::send_retryable_request(max_retries, move || {
+        let response = crate::retry::send_retryable_request(max_retries as usize, move || {
             let client = client.clone();
             let url = url.clone();
             let params = params.clone();
