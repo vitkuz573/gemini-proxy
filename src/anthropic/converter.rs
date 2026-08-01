@@ -530,3 +530,60 @@ mod tests {
         assert_eq!(map_gemini_finish_reason(None), "end_turn");
     }
 }
+
+#[cfg(test)]
+mod tool_use_id_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_tool_name_from_prior_tool_use_block() {
+        let req = MessagesRequest {
+            model: "claude-3".into(),
+            messages: vec![
+                Message {
+                    role: "assistant".into(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                        id: "toolu_01ABC".into(),
+                        name: "get_weather".into(),
+                        input: Some(serde_json::json!({"city": "Paris"})),
+                    }]),
+                },
+                Message {
+                    role: "user".into(),
+                    content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                        tool_use_id: "toolu_01ABC".into(),
+                        content: Some(crate::anthropic::types::ToolResultContent::Text("sunny".into())),
+                        is_error: None,
+                    }]),
+                },
+            ],
+            max_tokens: None,
+            system: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            stop_sequences: None,
+            stream: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            metadata: None,
+        };
+
+        let gemini_req = anthropic_to_gemini_request(&req).unwrap();
+        let contents = gemini_req.contents;
+        assert_eq!(contents.len(), 2);
+
+        // convert_message_content_to_parts inserts an empty text placeholder when
+        // a blocks-only message yields no other parts; the FunctionResponse we
+        // resolved is appended after that placeholder.
+        let user_parts = contents[1].parts.clone();
+        assert_eq!(user_parts.len(), 2);
+        match &user_parts[1] {
+            crate::gemini::types::Part::FunctionResponse(fr) => {
+                assert_eq!(fr.function_response.name, "get_weather");
+            }
+            other => panic!("expected function response part, got {:?}", other),
+        }
+    }
+}
