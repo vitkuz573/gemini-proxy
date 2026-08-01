@@ -25,6 +25,9 @@ pub enum ProxyError {
     #[error("Internal error: {0}")]
     Internal(String),
 
+    #[error("Rate limited: {0}")]
+    RateLimited(String),
+
     #[error(transparent)]
     Reqwest(#[from] reqwest::Error),
 
@@ -45,6 +48,7 @@ impl IntoResponse for ProxyError {
             ProxyError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ProxyError::ModelNotFound(model) => (StatusCode::NOT_FOUND, format!("Model not found: {model}")),
             ProxyError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            ProxyError::RateLimited(msg) => (StatusCode::TOO_MANY_REQUESTS, format!("Upstream rate limit: {msg}")),
             ProxyError::Reqwest(e) => (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")),
             ProxyError::SerdeJson(e) => (StatusCode::BAD_REQUEST, format!("JSON error: {e}")),
         };

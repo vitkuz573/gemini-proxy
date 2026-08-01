@@ -440,6 +440,7 @@ dependencies = [
  "dotenvy",
  "futures",
  "hex",
+ "http",
  "http-body-util",
  "reqwest",
  "serde",

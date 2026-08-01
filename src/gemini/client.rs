@@ -16,6 +16,7 @@ pub struct GeminiClient {
     client: Client,
     auth: GeminiAuth,
     base_url: String,
+    max_retries: u32,
     web_session: Arc<Mutex<Option<super::web_frontend::WebSession>>>,
     web_models: Arc<Mutex<Option<Vec<WebModelInfo>>>>,
 }
@@ -43,10 +44,18 @@ impl GeminiClient {
             None
         };
 
+        // Load max_retries from config via the auth cookie map if present,
+        // otherwise fall back to a sane default.
+        let max_retries = std::env::var("MAX_RETRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
+
         Ok(GeminiClient {
             client,
             auth,
             base_url,
+            max_retries,
             web_session: Arc::new(Mutex::new(web_session)),
             web_models: Arc::new(Mutex::new(None)),
         })
@@ -289,22 +298,27 @@ impl GeminiClient {
         model: &str,
         request: &GenerateContentRequest,
     ) -> Result<GenerateContentResponse> {
+        let client = self.client.clone();
         let url = self.build_url(&format!("/v1beta/models/{model}:generateContent"));
-        let mut req = self.client.post(&url).json(request);
-        req = self.apply_api_auth(req);
+        let request = request.clone();
+        let api_key = self.auth.api_key.clone();
 
         debug!(model, "sending generateContent request");
 
-        let response = req.send().await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            error!(status = %status, body = %body, "Gemini API error");
-            return Err(ProxyError::GeminiApi(format!(
-                "HTTP {status}: {body}"
-            )));
-        }
+        let response = crate::retry::send_retryable_request(self.max_retries, move || {
+            let client = client.clone();
+            let url = url.clone();
+            let request = request.clone();
+            let api_key = api_key.clone();
+            async move {
+                let mut req = client.post(&url).json(&request);
+                if let Some(ref key) = api_key {
+                    req = req.header("X-Goog-Api-Key", key);
+                }
+                req.send().await
+            }
+        })
+        .await?;
 
         let response: GenerateContentResponse = response.json().await?;
         Ok(response)
@@ -315,24 +329,30 @@ impl GeminiClient {
         model: &str,
         request: &GenerateContentRequest,
     ) -> Result<reqwest::Response> {
+        let client = self.client.clone();
         let url = self.build_url(&format!(
             "/v1beta/models/{model}:streamGenerateContent?alt=sse"
         ));
-        let mut req = self.client.post(&url).json(request);
-        req = self.apply_api_auth(req);
+        let request = request.clone();
+        let api_key = self.auth.api_key.clone();
+        let max_retries = self.max_retries;
 
         debug!(model, "sending streamGenerateContent request");
 
-        let response = req.send().await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            error!(status = %status, body = %body, "Gemini streaming error");
-            return Err(ProxyError::GeminiApi(format!(
-                "HTTP {status}: {body}"
-            )));
-        }
+        let response = crate::retry::send_retryable_request(max_retries, move || {
+            let client = client.clone();
+            let url = url.clone();
+            let request = request.clone();
+            let api_key = api_key.clone();
+            async move {
+                let mut req = client.post(&url).json(&request);
+                if let Some(ref key) = api_key {
+                    req = req.header("X-Goog-Api-Key", key);
+                }
+                req.send().await
+            }
+        })
+        .await?;
 
         Ok(response)
     }
@@ -341,6 +361,7 @@ impl GeminiClient {
         format!("{}{path}", self.base_url)
     }
 
+    #[cfg(test)]
     fn apply_api_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if let Some(ref api_key) = self.auth.api_key {
             req.header("X-Goog-Api-Key", api_key)
