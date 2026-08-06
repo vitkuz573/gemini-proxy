@@ -72,7 +72,9 @@ impl GeminiClient {
             .send_message_with_content(message)
             .await
             .map_err(map_sdk_error)?;
-        Ok(map_sdk_response(response))
+        let mut response = map_sdk_response(response);
+        response.finish_reason = Some("STOP".into());
+        Ok(response)
     }
 
     /// Start a streaming chat request and return the raw upstream response.
@@ -226,7 +228,31 @@ fn build_cookie_header(cookies: &HashMap<String, String>) -> String {
 }
 
 fn map_sdk_error(e: gemini_sdk::Error) -> ProxyError {
-    ProxyError::GeminiApi(e.to_string())
+    let message = e.to_string();
+    let code = extract_bard_error_code(&message);
+    let mapped = match code {
+        Some(1096) => {
+            "Gemini rejected the turn attestation (1096). If this is an image request, browser attestation is required but unavailable or failed.".to_string()
+        }
+        Some(1100) => {
+            "Gemini rejected the image/file attestation (1100). A real browser must generate valid slot 3/4 tokens for image requests.".to_string()
+        }
+        Some(1155) => {
+            "Gemini session/parameter mismatch (1155). Try a fresh conversation or enable browser attestation.".to_string()
+        }
+        Some(other) => format!("Gemini returned BardErrorInfo [{other}]"),
+        None => message,
+    };
+    ProxyError::GeminiApi(mapped)
+}
+
+fn extract_bard_error_code(message: &str) -> Option<u64> {
+    let start = message.find("BardErrorInfo")?;
+    let after = &message[start..];
+    let open = after.find('[')?;
+    let close = after[open..].find(']')?;
+    let inner = &after[open + 1..open + close];
+    inner.trim().parse().ok()
 }
 
 fn map_sdk_model_info(m: SdkModelInfo) -> ModelInfo {
@@ -356,7 +382,7 @@ pub fn map_client_response_to_generate_content_response(resp: ChatResponse) -> c
 fn map_sdk_response(response: SdkChatResponse) -> ChatResponse {
     ChatResponse {
         text: response.text,
-        finish_reason: response.finish_reason,
+        finish_reason: None,
     }
 }
 
