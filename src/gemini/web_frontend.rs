@@ -1831,10 +1831,35 @@ fn parse_stream_response(body: &str) -> Result<String> {
         return Ok(text);
     }
 
+    // Detect well-known Gemini error payloads and surface a clearer message.
+    if let Some(code) = extract_bard_error_code(body) {
+        let message = match code {
+            1096 => "Gemini rejected the turn attestation (1096). If this is an image request, browser attestation is required but unavailable or failed.".to_string(),
+            1100 => "Gemini rejected the image/file attestation (1100). A real browser must generate valid slot 3/4 tokens for image requests.".to_string(),
+            1155 => "Gemini session/parameter mismatch (1155). Try a fresh conversation or enable browser attestation.".to_string(),
+            _ => format!("Gemini returned BardErrorInfo [{code}]"),
+        };
+        error!(body_len = body.len(), body = %body, "BardErrorInfo {code}");
+        return Err(ProxyError::GeminiApi(message));
+    }
+
     error!(body_len = body.len(), body = %body, "Could not extract text from response");
     Err(ProxyError::GeminiApi(
         "Could not parse response from Gemini web frontend".into(),
     ))
+}
+
+/// Extract the numeric code from a `BardErrorInfo` protobuf wrapper if present.
+fn extract_bard_error_code(body: &str) -> Option<u64> {
+    // The wrapper looks like:
+    // [["wrb.fr",null,null,null,null,[13,null,[["type.googleapis.com/.../BardErrorInfo",[<code>]]]]]]
+    let start = body.find("BardErrorInfo")?;
+    let after = &body[start..];
+    // Find the inner array that contains the code: e.g. "[<code>]" or "[,<code>]"
+    let open = after.find('[')?;
+    let close = after[open..].find(']')?;
+    let inner = &after[open + 1..open + close];
+    inner.trim().parse().ok()
 }
 
 /// Extract text from a single response (non-streaming)
