@@ -384,6 +384,49 @@ impl WebFrontendClient {
     async fn init_session(&mut self) -> Result<()> {
         debug!("Initializing web session - fetching page data");
 
+        let body = self.fetch_app_page().await?;
+
+        // If the user has not yet accepted the latest consent banner, /app
+        // returns ZXlM5e=true and a consent.google.com/save URL. POSTing that
+        // URL sets the SOCS cookie, which is required for the interactive
+        // input area (and therefore browser attestation) to load.
+        let final_body = if let Some(save_url) = extract_consent_save_url(&body) {
+            debug!("Consent banner required; acquiring SOCS cookie");
+            self.accept_consent_and_refresh(&save_url).await?
+        } else {
+            body
+        };
+
+        // SNlM0e ("at" parameter) was removed from the /app HTML around mid-2026.
+        // batchexecute requests now succeed with an empty or dummy `at` value,
+        // so we keep the extractor only as a defensive fallback and never warn.
+        if let Some(token) = extract_snlim0e(&final_body) {
+            debug!("Extracted SNlM0e token");
+            self.session.access_token = Some(token);
+        } else {
+            debug!("SNlM0e token not present in /app HTML; using empty `at`");
+        }
+
+        if let Some(label) = extract_build_label(&final_body) {
+            debug!(label = %label, "Extracted build label");
+            self.session.build_label = Some(label);
+        }
+
+        if let Some(sid) = extract_session_id(&final_body) {
+            debug!(sid = %sid, "Extracted session ID");
+            self.session.session_id = Some(sid);
+        }
+
+        if let Some(push_id) = extract_push_id(&final_body) {
+            debug!(push_id = %push_id, "Extracted push_id from WIZ");
+            self.session.push_id = Some(push_id);
+        }
+
+        Ok(())
+    }
+
+    /// Fetch the Gemini /app page and return its HTML body.
+    async fn fetch_app_page(&self) -> Result<String> {
         let url = format!("{WEB_BASE_URL}/app?hl={}", self.session.language);
         let cookie_header = self.build_cookie_header();
 
@@ -413,37 +456,44 @@ impl WebFrontendClient {
             )));
         }
 
-        let body = response
+        response
             .text()
             .await
-            .map_err(|e| ProxyError::GeminiApi(format!("Failed to read response body: {e}")))?;
+            .map_err(|e| ProxyError::GeminiApi(format!("Failed to read response body: {e}")))
+    }
 
-        // SNlM0e ("at" parameter) was removed from the /app HTML around mid-2026.
-        // batchexecute requests now succeed with an empty or dummy `at` value,
-        // so we keep the extractor only as a defensive fallback and never warn.
-        if let Some(token) = extract_snlim0e(&body) {
-            debug!("Extracted SNlM0e token");
-            self.session.access_token = Some(token);
-        } else {
-            debug!("SNlM0e token not present in /app HTML; using empty `at`");
+    /// POST the consent save URL, store the returned SOCS cookie, and re-fetch
+    /// /app so the session extracts values from the consent-cleared page.
+    async fn accept_consent_and_refresh(&mut self, save_url: &str) -> Result<String> {
+        let cookie_header = self.build_cookie_header();
+        let response = self
+            .client
+            .post(save_url)
+            .header("Cookie", &cookie_header)
+            .header("User-Agent", USER_AGENT)
+            .header("Referer", format!("{WEB_BASE_URL}/app?hl={}", self.session.language))
+            .header("Origin", WEB_BASE_URL)
+            .header("Content-Length", "0")
+            .body("")
+            .send()
+            .await
+            .map_err(|e| ProxyError::GeminiApi(format!("Consent save request failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() && status.as_u16() != 204 {
+            return Err(ProxyError::GeminiApi(format!(
+                "Consent save failed: HTTP {status}"
+            )));
         }
 
-        if let Some(label) = extract_build_label(&body) {
-            debug!(label = %label, "Extracted build label");
-            self.session.build_label = Some(label);
+        // Merge any cookies the response set back into our cookie jar.
+        for cookie in response.cookies() {
+            self.cookies.insert(cookie.name().to_string(), cookie.value().to_string());
+            self.session.cookies.insert(cookie.name().to_string(), cookie.value().to_string());
         }
 
-        if let Some(sid) = extract_session_id(&body) {
-            debug!(sid = %sid, "Extracted session ID");
-            self.session.session_id = Some(sid);
-        }
-
-        if let Some(push_id) = extract_push_id(&body) {
-            debug!(push_id = %push_id, "Extracted push_id from WIZ");
-            self.session.push_id = Some(push_id);
-        }
-
-        Ok(())
+        debug!("SOCS cookie acquired; refreshing /app");
+        self.fetch_app_page().await
     }
 
     pub async fn generate_content(
@@ -1609,6 +1659,32 @@ fn extract_push_id(body: &str) -> Option<String> {
     }
 
     None
+}
+
+/// Extract the consent save URL from `/app` HTML when a consent banner is
+/// required. The URL is POSTed to obtain the `SOCS` cookie.
+fn extract_consent_save_url(body: &str) -> Option<String> {
+    // The URL lives inside the `bard-initial-data` JSON payload under `qw1mtf`.
+    let payload_start = body.find("id=\"bard-initial-data\"")?;
+    let data_start = body[payload_start..].find("data-payload=\"")? + payload_start;
+    let value_start = data_start + "data-payload=\"".len();
+    let value_end = body[value_start..].find('"')? + value_start;
+    let encoded = &body[value_start..value_end];
+
+    // Decode HTML entities (&quot;) before parsing JSON.
+    let decoded = encoded
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+
+    let value: Value = serde_json::from_str(&decoded).ok()?;
+    value
+        .get("qw1mtf")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Extract multi-turn conversation state from a raw StreamGenerate response.
