@@ -287,41 +287,116 @@ captures; their purpose is unknown.
 
 | Slot | Field | Role | Text-only fallback | Browser-captured value |
 |------|-------|------|--------------------|------------------------|
-| 0 | 1 | Current user turn | `["<prompt>", 0, null, null, null, null, 0]` | same, or with attachment array for image turns |
-| 1 | 2 | Locale | `["en"]` | `["en"]` |
-| 2 | 3 | Conversation state | `["", "", "", null, null, null, null, null, null, ""]` | `["c_...", "r_...", "rc_...", null, null, null, null, null, null, "<continuation>"]` |
-| 3 | 4 | Web-attestation token (`Ijb`) | `""` | `!0…` signed token (1500–2600 chars) |
-| 4 | 5 | Attestation hash (`Jjb`) | `""` | 32-char hex string |
-| 5 | 6 | Unknown | `null` | `null` |
-| 6 | 7 | Unknown flag | `[1]` | `[1]` |
-| 7 | 8 | Unknown flag | `1` | `1` |
-| 10 | 11 | Unknown flag | `1` | `1` |
-| 11 | 12 | Unknown int | `0` | `0` |
-| 17 | 18 | Turn counter | `[[0]]` | `[[0]]` / `[[1]]` |
-| 18 | 19 | Unknown int | `0` | `0` |
-| 27 | 28 | Unknown flag | `1` | `1` |
-| 30 | 31 | Mode category enum | `[4]` or model enum | `[4]` / `[1]` / `[2]` / `[3]` / `[6]` |
-| 41 | 42 | Unknown int | `[2]` | `[2]` or `[1]` |
-| 53 | 54 | Unknown bool/int | `0` | `0` |
-| 59 | 60 | Client request UUID | fresh UUID | fresh UUID |
-| 61 | 62 | Unknown empty array | `[]` | `[]` |
-| 66 | 67 | Timestamp array | `[unix_secs, 0]` | `null` |
-| 68 | 69 | Unknown int | `1` | `2` |
-| 79 | 80 | Unknown int | `6` | `6` or `3` |
-| 80 | 81 | Unknown int | not set | `1` or `null` |
-| 91 | 92 | Unknown int | `0` | `0` |
-| 96 | 97 | Unknown int | `0` | `0` |
+| 0 | 1 | Current user turn (proto `QN`) | `["<prompt>", 0, null, null, null, null, 0]` | same, or with attachment array for image turns |
+| 1 | 2 | Locale (proto `NJ`) | `["en"]` | `["en"]` |
+| 2 | 3 | Conversation state (proto `FM`) | `["", "", "", null, null, null, null, null, null, ""]` | `["c_...", "r_...", "rc_...", null, null, null, null, null, null, "<continuation>"]` |
+| 3 | 4 | Web-attestation token (proto `Ijb` / `Ckb`) | `""` | `!0…` signed token (1500–2600 chars) |
+| 4 | 5 | Attestation hash (proto `Jjb` / `Dkb`) | `""` | 32-char hex string |
+| 5 | 6 | Unknown; always `null` in captures | `null` | `null` |
+| 6 | 7 | Locale-wrapper submessage (proto `rcd`) | `[1]` | `[1]` |
+| 7 | 8 | Always-`true` flag (`kcd`) | `1` | `1` |
+| 10 | 11 | Platform enum (`mcd` / `_.MD`) | `1` | `1` |
+| 11 | 12 | Boolean flag (`icd` / `Jnb`) | `0` | `0` |
+| 17 | 18 | Turn counter (`Ycd`) | `[[0]]` | `[[0]]` / `[[1]]` |
+| 18 | 19 | Enum (`lcd` / `Go`) | `0` | `0` |
+| 27 | 28 | `true` flag (`jcd`) | `1` | `1` |
+| 30 | 31 | Model category enum (`_.Dm`) | `[4]` or model enum | `[4]` / `[1]` / `[2]` / `[3]` / `[6]` |
+| 41 | 42 | Mode picker option (`VEc` / `P$c`) | `[2]` | `[2]` or `[1]` |
+| 53 | 54 | Boolean flag (`hcd` / `f8d`) | `0` | `0` |
+| 59 | 60 | Client request UUID (`a.Hd`) | fresh UUID | fresh UUID |
+| 61 | 62 | User context submessage (`_.aSc`) | `[]` | `[]` |
+| 66 | 67 | Timestamp array (`uda`) | `[unix_secs, 0]` | `null` |
+| 68 | 69 | Locale variant (`Gdd`) | `1` | `2` |
+| 79 | 80 | Mode/experiment submessage (`_.udd`) | `6` | `6` or `3` |
+| 80 | 81 | Model thinking mode enum (`wi` / `Zbd`) | not set | `1` or `null` |
+| 91 | 92 | Boolean flag (`p` / `uda`) | `0` | `0` |
+| 96 | 97 | Boolean flag (`t` / `Aa.Aa`) | `0` | `0` |
+
+**Mode picker option values (slot 41):**
+
+| Value | Meaning |
+|-------|---------|
+| `[1]` | Default / no explicit picker selection |
+| `[2]` | Explicit model selection from the picker |
+
+**Thinking-mode enum values (slot 80):**
+
+| Value | Meaning |
+|-------|---------|
+| `0` | None / not specified |
+| `1` | `THINKING_LEVEL_STANDARD` |
+| `2` | `THINKING_LEVEL_EXTENDED` |
+| `3` | `THINKING_LEVEL_DEEP_THINK` |
 
 When a browser-captured payload is replayed, the proxy should only override the
 slots it must control: slot 0 (prompt / attachments), slot 30 (model category),
 and slot 59 (fresh request UUID). Browser-specific values in slots 3, 4, 6, 41,
 66, 68, 79, and 80 should be preserved.
 
-### Side-channel header parity
+### Remaining unknowns
 
-The `x-goog-ext-525005358-jspb` request header must contain the same UUID as
-`inner_req_list[59]`, encoded as `["<UUID>", 1]`. The proxy builds this from
-the slot value; they must stay in sync when slot 59 is overridden.
+A few slots are present in captures but their exact semantics could not be
+verified:
+
+| Slot | Field | Observed | Notes |
+|------|-------|----------|-------|
+| 5 | 6 | `null` | Never populated in analyzed captures. |
+| 18 | 19 | `0` | Enum `Go`; default `0`, purpose unknown. |
+| 53 | 54 | `0` | Boolean flag `f8d`; default `false`. |
+| 66 | 67 | `null` or `[ts, 0]` | Timestamp pair in some captures; not emitted by `_.Hdd`, likely merged from a side-channel context. |
+| 79 | 80 | `3` or `6` | Submessage `_.udd` from `Kc.NM.cBa`; likely experiment/mode grouping. |
+| 91 | 92 | `0` | Boolean flag `p` from `this.Aa.hb`; default `false`. |
+| 96 | 97 | `0` | Boolean flag `t` from `this.Aa.Aa()`; default `false`. |
+
+Slots not listed in this section were `null` in all available captures.
+
+### Side-channel headers
+
+Google's web frontend uses a few `x-goog-ext-*` headers to carry metadata that
+is not part of the `f.req` protobuf. Captures show these headers on
+`StreamGenerate`:
+
+| Header | Example value | Purpose |
+|--------|---------------|---------|
+| `x-goog-ext-525005358-jspb` | `["<UUID>", 1]` | **Must match `inner_req_list[59]` (slot 59 / field 60).** The UUID is the client request id; the trailing `1` is a fixed marker. If the header UUID differs from the slot UUID the request is rejected. |
+| `x-goog-ext-525001261-jspb` | varies | Secondary routing context; not required for basic requests. |
+| `x-goog-ext-73010989-jspb` | varies | Telemetry / experiment marker. |
+| `x-goog-ext-73010990-jspb` | varies | Telemetry / experiment marker. |
+
+The proxy only needs to mirror `x-goog-ext-525005358-jspb` with the same value
+it places in `inner_req_list[59]`. The other headers are optional in replays.
+
+## Response frame layout
+
+`StreamGenerate` returns `text/plain` with the same WIZ anti-XSSI prefix as
+batchexecute:
+
+```text
+)]}'
+
+[["wrb.fr",null,"<json-string>"]]
+<length>
+[["di",<n>],["af.httprm",<n>,"<token>",1]]
+<length>
+[["e",<n>,null,null,<total-length>]]
+```
+
+| Frame | Meaning |
+|-------|---------|
+| `wrb.fr` | The actual response payload. For a successful turn it is a JSON string containing the candidate list and meta fields. For errors it carries a `BardErrorInfo` protobuf entry. |
+| `di` | End-of-stream / keepalive marker. |
+| `af.httprm` | HTTP push / resume token; the trailing `1` means "done". |
+| `e` | Final envelope with the total byte count. |
+
+Error frames embed a `BardErrorInfo` message:
+
+```json
+[["wrb.fr", null, null, null, null,
+  [13, null,
+    [["type.googleapis.com/assistant.boq.bard.application.BardErrorInfo", [<code>]]]
+  ]
+]]
+```
 
 ## Error codes
 
@@ -474,7 +549,45 @@ Body: <raw image bytes>
 
 The response body is a `contrib_service` reference path such as
 `/contrib_service/ttl_1d/<token>`. That reference is inserted into
-`inner_req_list[0]` in the live-captured format:
+`inner_req_list[0]` in the live-captured format. Slot 0 is the WIZ
+serialization of the user-turn proto (`_.QN`). Its fields are:
+
+| `inner_req_list[0]` index | Proto field | Meaning |
+|---------------------------|-------------|---------|
+| 0 | 1 | Prompt text (`setText`). |
+| 1 | 2 | `Ah` boolean (`Acd`). |
+| 2 | 3 | Always `null` in captures. |
+| 3 | 4 | Attachment list (`_.zi(QN,4,B)`), present only when attachments exist. |
+| 4 | 5 | `Mfa` string / override text, if any. |
+| 5 | 6 | Always `null` in captures. |
+| 6 | 7 | `Jh` boolean (`zcd`). |
+
+When attachments are present, index `3` is an array of attachment tuples. Each
+tuple is the WIZ serialization of a `_.QJ` message:
+
+```json
+[
+  ["<reference>", <file_type>, null, "<mime_type>"],
+  "<filename>",
+  null, null, null, null, null, null,
+  [0]
+]
+```
+
+The first element is a `_.hvc` submessage (field 1 of `_.QJ`) with:
+
+| Index | Field | Meaning |
+|-------|-------|---------|
+| 0 | 1 | Uploaded `contrib_service` reference path. |
+| 1 | 2 | File type enum (`1` for inline image). |
+| 2 | 3 | `rl` / role field; always `null` in captures. |
+| 3 | 4 | MIME type, e.g. `image/png`. |
+
+The second element is the file name. The trailing `[0]` at index 8 (field 9) is a
+`_.bI` submessage placeholder; its exact meaning is unknown but it is required
+for the attachment to be accepted.
+
+Example slot 0 with one image:
 
 ```json
 [
@@ -496,6 +609,34 @@ The response body is a `contrib_service` reference path such as
 ```
 
 When no attachments are present slot 0 keeps the simple string-only format.
+
+### Notable slot semantics
+
+Slots whose role is not fully verified are marked with a question mark.
+
+| Slot | Field | Notes |
+|------|-------|-------|
+| 1 | 2 | Locale string, e.g. `["en"]`. The value comes from `_.NJ` via `ocd`. |
+| 2 | 3 | Conversation state (`_.FM`). Fields 1–3 are `conversation_id`, `xq`, `XY`; field 10 is the continuation token (`KQ`). |
+| 6 | 7 | Locale wrapper (`_.rcd`). Captures always show `[1]`; the inner value is set by `qcd` from the locale service. |
+| 7 | 8 | Hard-coded `true` by `kcd`. |
+| 10 | 11 | Platform enum set by `mcd` / `_.MD(this.wb)`. Usually `1` for web. |
+| 11 | 12 | Boolean flag `Jnb`, default `false`. |
+| 17 | 18 | Turn counter. `[[0]]` for the first turn; `[[1]]` for follow-ups in a stateful conversation. |
+| 18 | 19 | Enum `Go`, default `0`. Purpose unknown. |
+| 27 | 28 | Hard-coded `true` by `jcd`. |
+| 30 | 31 | Model category enum. See the category table above. |
+| 41 | 42 | Mode picker option. `[1]` = default/no explicit selection; `[2]` = explicit picker selection. |
+| 53 | 54 | Boolean flag `f8d`, default `false`. |
+| 59 | 60 | Client request UUID. Must match `x-goog-ext-525005358-jspb`. |
+| 61 | 62 | User context submessage (`_.aSc`). Captures show an empty array `[]`. |
+| 66 | 67 | Timestamp pair `[unix_seconds, 0]` ? Only present in some captures. |
+| 68 | 69 | Locale variant: `1` for English (`en`), `2` for non-English locales. |
+| 79 | 80 | Mode/experiment submessage (`_.udd`). Values `3` or `6` observed; exact meaning unknown. |
+| 80 | 81 | Thinking-level enum. Values listed above. |
+| 91 | 92 | Boolean flag `p` from `this.Aa.hb`, default `false`. |
+| 96 | 97 | Boolean flag `t` from `this.Aa.Aa()`, default `false`. |
+
 The implementation lives in `src/gemini/web_frontend.rs`:
 
 - `WebFrontendClient::upload_file` performs the two-step resumable upload.
