@@ -229,7 +229,7 @@ fn build_cookie_header(cookies: &HashMap<String, String>) -> String {
 
 fn map_sdk_error(e: gemini_sdk::Error) -> ProxyError {
     let message = e.to_string();
-    let code = extract_bard_error_code(&message);
+    let code = gemini_sdk::extract_bard_error_code(&message);
     let mapped = match code {
         Some(1096) => {
             "Gemini rejected the turn attestation (1096). If this is an image request, browser attestation is required but unavailable or failed.".to_string()
@@ -244,15 +244,6 @@ fn map_sdk_error(e: gemini_sdk::Error) -> ProxyError {
         None => message,
     };
     ProxyError::GeminiApi(mapped)
-}
-
-fn extract_bard_error_code(message: &str) -> Option<u64> {
-    let start = message.find("BardErrorInfo")?;
-    let after = &message[start..];
-    let open = after.find('[')?;
-    let close = after[open..].find(']')?;
-    let inner = &after[open + 1..open + close];
-    inner.trim().parse().ok()
 }
 
 fn map_sdk_model_info(m: SdkModelInfo) -> ModelInfo {
