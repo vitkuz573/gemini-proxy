@@ -22,6 +22,7 @@ fn make_config() -> Config {
         cors_origins: vec!["*".to_string()],
         gemini_headless_browser: None,
         chrome_path: None,
+        push_id: None,
     }
 }
 
@@ -29,6 +30,7 @@ fn make_auth() -> GeminiAuth {
     GeminiAuth {
         cookies: HashMap::new(),
         api_key: Some("test_key".into()),
+        chrome_path: None,
     }
 }
 

@@ -226,6 +226,39 @@ impl BrowserAttestationClient {
             }
         }
 
+        // Re-authenticate the page with the injected cookies so the Angular app
+        // boots into a signed-in state rather than showing a static landing page.
+        conn.call("Page.reload", json!({"ignoreCache": true})).await?;
+        wait_for_event(conn, "Page.loadEventFired", Duration::from_secs(45)).await?;
+
+        // Wait again for the interactive input after reload.
+        conn.call(
+            "Runtime.evaluate",
+            json!({
+                "expression": r#"
+                    new Promise((resolve) => {
+                        const deadline = Date.now() + 15000;
+                        const check = () => {
+                            const textarea = document.querySelector('.initial-input-area textarea, .initial-input-area-container textarea, textarea[placeholder*="Ask"], .ql-editor[contenteditable="true"], rich-textarea [contenteditable="true"]');
+                            if (textarea && textarea.offsetParent !== null) {
+                                resolve(true);
+                                return;
+                            }
+                            if (Date.now() < deadline) {
+                                setTimeout(check, 200);
+                            } else {
+                                resolve(false);
+                            }
+                        };
+                        check();
+                    })
+                "#,
+                "awaitPromise": true,
+                "returnByValue": true,
+            }),
+        )
+        .await?;
+
         // If not reloaded we still want to be sure we are on /app.
         if !needs_reload {
             let loc = conn
@@ -381,6 +414,7 @@ async fn launch_chrome(
         .arg("--disable-renderer-backgrounding")
         .arg("--disable-features=TranslateUI")
         .arg("--remote-debugging-port=0")
+        .arg("--remote-allow-origins=*")
         .arg(format!("--user-data-dir={}", user_data_dir.display()))
         .stderr(Stdio::piped())
         .stdout(Stdio::piped())

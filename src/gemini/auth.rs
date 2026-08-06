@@ -7,12 +7,15 @@ use crate::error::{ProxyError, Result};
 pub struct GeminiAuth {
     pub cookies: HashMap<String, String>,
     pub api_key: Option<String>,
+    /// Effective Chrome/Chromium executable path used for browser attestation.
+    pub chrome_path: Option<String>,
 }
 
 impl GeminiAuth {
     pub fn from_config(config: &Config) -> Result<Self> {
         let cookies = config.gemini_cookies.clone();
         let api_key = config.gemini_api_key.clone();
+        let chrome_path = config.browser_path().map(|s| s.to_string());
 
         if !config.has_cookie_auth() && !config.has_api_key() {
             return Err(ProxyError::Config(
@@ -20,7 +23,11 @@ impl GeminiAuth {
             ));
         }
 
-        Ok(GeminiAuth { cookies, api_key })
+        Ok(GeminiAuth {
+            cookies,
+            api_key,
+            chrome_path,
+        })
     }
 
     pub fn is_cookie_auth(&self) -> bool {
@@ -43,6 +50,7 @@ mod tests {
         GeminiAuth {
             cookies,
             api_key: None,
+            chrome_path: None,
         }
     }
 
@@ -58,6 +66,7 @@ mod tests {
         let auth = GeminiAuth {
             cookies: HashMap::new(),
             api_key: Some("test_key".into()),
+            chrome_path: None,
         };
         assert!(!auth.is_cookie_auth());
         assert!(auth.is_api_key_auth());
@@ -76,6 +85,7 @@ mod tests {
             cors_origins: vec!["*".to_string()],
             gemini_headless_browser: None,
             chrome_path: None,
+            push_id: None,
         };
         let result = GeminiAuth::from_config(&config);
         assert!(result.is_err());

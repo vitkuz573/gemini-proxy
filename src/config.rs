@@ -19,6 +19,11 @@ pub struct Config {
     /// Alias for `gemini_headless_browser`.  If both are set,
     /// `GEMINI_HEADLESS_BROWSER` wins.
     pub chrome_path: Option<String>,
+    /// Google upload feed ID used by the Gemini web frontend when pushing
+    /// attached files to `push.clients6.google.com/upload/`.  Observed value is
+    /// usually `feeds/<...>`.  Can be overridden per-account via the
+    /// `GEMINI_PUSH_ID` environment variable.
+    pub push_id: Option<String>,
 }
 
 impl Config {
@@ -63,6 +68,10 @@ impl Config {
             .ok()
             .filter(|s| !s.is_empty());
 
+        let push_id = env::var("GEMINI_PUSH_ID")
+            .ok()
+            .filter(|s| !s.is_empty());
+
         Ok(Config {
             listen_addr,
             gemini_base_url,
@@ -74,6 +83,7 @@ impl Config {
             cors_origins,
             gemini_headless_browser,
             chrome_path,
+            push_id,
         })
     }
 

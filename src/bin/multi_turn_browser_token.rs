@@ -1,15 +1,20 @@
+#[cfg(feature = "browser-attestation")]
 use std::collections::HashMap;
+#[cfg(feature = "browser-attestation")]
 use std::time::Duration;
 
-use gemini_proxy::gemini::browser_attestation::BrowserAttestationClient;
-use gemini_proxy::gemini::web_frontend::{extract_conversation_state, WebConversationState};
+#[cfg(feature = "browser-attestation")]
 use reqwest::Client;
+#[cfg(feature = "browser-attestation")]
 use serde_json::{json, Value};
 
+#[cfg(feature = "browser-attestation")]
 const WEB_BASE_URL: &str = "https://gemini.google.com";
+#[cfg(feature = "browser-attestation")]
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
+#[cfg(feature = "browser-attestation")]
 fn parse_cookies(raw: &str) -> HashMap<String, String> {
     raw.split(';')
         .filter_map(|pair| {
@@ -21,6 +26,7 @@ fn parse_cookies(raw: &str) -> HashMap<String, String> {
         .collect()
 }
 
+#[cfg(feature = "browser-attestation")]
 fn build_headers(cookies: &HashMap<String, String>) -> Vec<(String, String)> {
     let cookie_header = cookies
         .iter()
@@ -42,6 +48,7 @@ fn build_headers(cookies: &HashMap<String, String>) -> Vec<(String, String)> {
     ]
 }
 
+#[cfg(feature = "browser-attestation")]
 async fn init_session(client: &Client, cookies: &HashMap<String, String>) -> (Option<String>, Option<String>, Option<String>) {
     let url = format!("{WEB_BASE_URL}/app?hl=en");
     let mut req = client.get(&url).header("User-Agent", USER_AGENT);
@@ -86,6 +93,7 @@ async fn init_session(client: &Client, cookies: &HashMap<String, String>) -> (Op
     }
 }
 
+#[cfg(feature = "browser-attestation")]
 fn extract_snlim0e(body: &str) -> Option<String> {
     if let Some(idx) = body.find("\"SNlM0e\":\"") {
         let start = idx + "\"SNlM0e\":\"".len();
@@ -99,6 +107,7 @@ fn extract_snlim0e(body: &str) -> Option<String> {
     None
 }
 
+#[cfg(feature = "browser-attestation")]
 fn extract_build_label(body: &str) -> Option<String> {
     let patterns = [
         "boq_assistant-bard-web-server_",
@@ -120,6 +129,7 @@ fn extract_build_label(body: &str) -> Option<String> {
     None
 }
 
+#[cfg(feature = "browser-attestation")]
 fn extract_session_id(body: &str) -> Option<String> {
     let patterns = ["\"FdrFJe\":\"", "session_id\":\""];
     for pattern in &patterns {
@@ -136,10 +146,11 @@ fn extract_session_id(body: &str) -> Option<String> {
     None
 }
 
+#[cfg(feature = "browser-attestation")]
 fn build_inner_req_list_no_browser(
     prompt: &str,
     category_enum: u64,
-    state: Option<&WebConversationState>,
+    state: Option<&gemini_proxy::gemini::web_frontend::WebConversationState>,
     slot3: Option<Value>,
     slot4: Option<Value>,
     slot5: Option<Value>,
@@ -197,20 +208,27 @@ fn build_inner_req_list_no_browser(
     inner
 }
 
-fn build_stream_generate_body(inner_req_list: &[Value]) -> String {
+#[cfg(feature = "browser-attestation")]
+fn build_stream_generate_body(inner_req_list: &[Value], at: &str) -> String {
     let inner_json = serde_json::to_string(inner_req_list).unwrap_or_default();
     let f_req = json!([null, inner_json]);
     let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
-    format!("f.req={}", urlencoding::encode(&f_req_str))
+    let form_data = [
+        format!("f.req={}", urlencoding::encode(&f_req_str)),
+        format!("at={}", urlencoding::encode(at)),
+    ];
+    form_data.join("&")
 }
 
+#[cfg(feature = "browser-attestation")]
 async fn send_turn(
     client: &Client,
     headers: &[(String, String)],
     params: &[(&str, &str)],
     inner_req_list: &[Value],
+    at: &str,
 ) -> Result<String, String> {
-    let body = build_stream_generate_body(inner_req_list);
+    let body = build_stream_generate_body(inner_req_list, at);
     let url = format!("{WEB_BASE_URL}/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate");
 
     let mut req = client.post(&url).query(params).body(body);
@@ -233,6 +251,7 @@ async fn send_turn(
     Ok(text)
 }
 
+#[cfg(feature = "browser-attestation")]
 fn response_text_snippet(body: &str) -> String {
     for line in body.lines() {
         let line = line.trim();
@@ -254,205 +273,240 @@ fn response_text_snippet(body: &str) -> String {
 
 #[tokio::main]
 async fn main() {
-    let cookies_str = std::env::var("GEMINI_COOKIES").expect("GEMINI_COOKIES env var");
-    let cookies = parse_cookies(&cookies_str);
-    let chrome_path = std::env::var("CHROME_PATH").unwrap_or_else(|_| "/usr/bin/chromium".into());
-
-    let client = Client::builder()
-        .pool_max_idle_per_host(20)
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(120))
-        .build()
-        .expect("build client");
-
-    let out_dir = "/tmp/opencode/captures/multi_turn_no_browser";
-    std::fs::create_dir_all(out_dir).unwrap();
-
-    let (access_token, build_label, session_id) = init_session(&client, &cookies).await;
-    println!("session: at={:?} bl={:?} sid={:?}", access_token.is_some(), build_label, session_id);
-
-    let headers = build_headers(&cookies);
-    let category_enum = 4u64;
-
-    // Use the browser to generate a first-turn payload with valid attestation.
-    let browser_client = BrowserAttestationClient::new(chrome_path);
-    println!("\n=== Capturing first turn via browser ===");
-    let payload = match browser_client
-        .get_stream_generate_payload(&cookies, "My name is Alice. Remember it.", None)
-        .await
+    #[cfg(not(feature = "browser-attestation"))]
     {
-        Ok(p) => {
-            std::fs::write(
-                format!("{out_dir}/browser_turn1_inner_req_list.json"),
-                serde_json::to_string_pretty(&p.inner_req_list).unwrap(),
-            )
-            .unwrap();
-            println!("Browser first-turn payload captured");
-            p
-        }
-        Err(e) => {
-            println!("Browser capture failed: {e}");
-            browser_client.close().await;
-            return;
-        }
-    };
-
-    // Send the browser payload via raw HTTP to verify it works and extract state.
-    let _prompt1 = "My name is Alice. Remember it.";
-    let reqid1 = {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        ((ts % 900_000) + 100_000).to_string()
-    };
-    let mut params1 = vec![
-        ("hl", "en"),
-        ("_reqid", reqid1.as_str()),
-        ("rt", "c"),
-        ("pageId", "none"),
-    ];
-    if let Some(ref bl) = build_label {
-        params1.push(("bl", bl.as_str()));
-    }
-    if let Some(ref sid) = session_id {
-        params1.push(("f.sid", sid.as_str()));
+        eprintln!("This binary requires the 'browser-attestation' feature.");
+        eprintln!("Run with: cargo run --bin multi_turn_browser_token --features browser-attestation");
+        std::process::exit(1);
     }
 
-    let inner1 = payload.inner_req_list.clone();
-    let body1 = build_stream_generate_body(&inner1);
-    std::fs::write(format!("{out_dir}/browser_turn1_request_body.txt"), &body1).unwrap();
+    #[cfg(feature = "browser-attestation")]
+    {
+        use gemini_proxy::gemini::browser_attestation::BrowserAttestationClient;
+        use gemini_proxy::gemini::web_frontend::extract_conversation_state;
 
-    println!("\n=== Sending browser-generated first turn via HTTP ===");
-    let state = match send_turn(&client, &headers, &params1, &inner1).await {
-        Ok(body) => {
-            std::fs::write(format!("{out_dir}/browser_turn1_response_raw.txt"), &body).unwrap();
-            println!("Browser turn 1 HTTP OK; body length {}", body.len());
-            println!("Text snippet: {}", response_text_snippet(&body));
-            match extract_conversation_state(&body) {
-                Ok(s) => {
-                    println!("Extracted state: {:?}", s);
-                    std::fs::write(
-                        format!("{out_dir}/browser_turn1_state.json"),
-                        serde_json::to_string_pretty(&json!({
-                            "conversation_id": s.conversation_id,
-                            "response_id": s.response_id,
-                            "response_part_id": s.response_part_id,
-                            "continuation_token": s.continuation_token,
-                        }))
-                        .unwrap(),
-                    )
-                    .unwrap();
-                    Some(s)
-                }
-                Err(e) => {
-                    println!("Failed to extract state: {e}");
-                    None
+        let cookies_str = std::env::var("GEMINI_COOKIES").expect("GEMINI_COOKIES env var");
+        let cookies = parse_cookies(&cookies_str);
+        let chrome_path = std::env::var("CHROME_PATH").unwrap_or_else(|_| "/usr/bin/chromium".into());
+
+        let client = Client::builder()
+            .pool_max_idle_per_host(20)
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .expect("build client");
+
+        let out_dir = "/tmp/opencode/captures/multi_turn_no_browser";
+        std::fs::create_dir_all(out_dir).unwrap();
+
+        let (access_token, build_label, session_id) = init_session(&client, &cookies).await;
+        let _ = access_token;
+        println!("session: bl={:?} sid={:?}", build_label, session_id);
+
+        let headers = build_headers(&cookies);
+        let category_enum = 4u64;
+
+        // Use the browser to generate a first-turn payload with valid attestation.
+        let browser_client = BrowserAttestationClient::new(chrome_path);
+        println!("\n=== Capturing first turn via browser ===");
+        let payload = match browser_client
+            .get_stream_generate_payload(&cookies, "My name is Alice. Remember it.", None)
+            .await
+        {
+            Ok(p) => {
+                std::fs::write(
+                    format!("{out_dir}/browser_turn1_inner_req_list.json"),
+                    serde_json::to_string_pretty(&p.inner_req_list).unwrap(),
+                )
+                .unwrap();
+                println!("Browser first-turn payload captured");
+                p
+            }
+            Err(e) => {
+                println!("Browser capture failed: {e}");
+                browser_client.close().await;
+                return;
+            }
+        };
+
+        // Send the browser payload via raw HTTP to verify it works and extract state.
+        let reqid1 = {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            ((ts % 900_000) + 100_000).to_string()
+        };
+        let mut params1 = vec![
+            ("hl", "en"),
+            ("_reqid", reqid1.as_str()),
+            ("rt", "c"),
+            ("pageId", "none"),
+        ];
+        if let Some(ref bl) = build_label {
+            params1.push(("bl", bl.as_str()));
+        }
+        if let Some(ref sid) = session_id {
+            params1.push(("f.sid", sid.as_str()));
+        }
+
+        let inner1 = payload.inner_req_list.clone();
+        let body1 = build_stream_generate_body(&inner1, "");
+        std::fs::write(format!("{out_dir}/browser_turn1_request_body.txt"), &body1).unwrap();
+
+        // Use the browser's own session context for the replay; the HTTP init_session
+        // values are from a separate page load and won't match the captured at token.
+        // Browser payload now only contains inner_req_list; session values are taken
+        // from the separate HTTP init_session.
+        let mut params1 = vec![
+            ("hl", "en"),
+            ("_reqid", reqid1.as_str()),
+            ("rt", "c"),
+            ("pageId", "none"),
+            ("bl", build_label.as_deref().unwrap_or("")),
+            ("f.sid", session_id.as_deref().unwrap_or("")),
+        ];
+
+        println!("\n=== Sending browser-generated first turn via HTTP ===");
+        let state = match send_turn(&client, &headers, &params1, &inner1, "").await {
+            Ok(body) => {
+                std::fs::write(format!("{out_dir}/browser_turn1_response_raw.txt"), &body).unwrap();
+                println!("Browser turn 1 HTTP OK; body length {}", body.len());
+                println!("Text snippet: {}", response_text_snippet(&body));
+                match extract_conversation_state(&body) {
+                    Ok(s) => {
+                        println!("Extracted state: {:?}", s);
+                        std::fs::write(
+                            format!("{out_dir}/browser_turn1_state.json"),
+                            serde_json::to_string_pretty(&json!({
+                                "conversation_id": s.conversation_id,
+                                "response_id": s.response_id,
+                                "response_part_id": s.response_part_id,
+                                "continuation_token": s.continuation_token,
+                            }))
+                            .unwrap(),
+                        )
+                        .unwrap();
+                        Some(s)
+                    }
+                    Err(e) => {
+                        println!("Failed to extract state: {e}");
+                        None
+                    }
                 }
             }
-        }
-        Err(e) => {
-            std::fs::write(format!("{out_dir}/browser_turn1_error.txt"), &e).unwrap();
-            println!("Browser turn 1 failed: {e}");
-            None
-        }
-    };
+            Err(e) => {
+                std::fs::write(format!("{out_dir}/browser_turn1_error.txt"), &e).unwrap();
+                println!("Browser turn 1 failed: {e}");
+                None
+            }
+        };
 
-    browser_client.close().await;
+        browser_client.close().await;
 
-    let state = match state {
-        Some(s) => s,
-        None => {
-            println!("No state; cannot continue.");
-            return;
-        }
-    };
+        let state = match state {
+            Some(s) => s,
+            None => {
+                println!("No state; cannot continue.");
+                return;
+            }
+        };
 
-    // For the second turn we need fresh attestation tokens from the browser.
-    // Launch a new browser client with the conversation_id so it continues the
-    // same conversation and captures slots 3/4/5 for turn 2.
-    let browser_client2 = BrowserAttestationClient::new(
-        std::env::var("CHROME_PATH").unwrap_or_else(|_| "/usr/bin/chromium".into()),
-    );
-    println!("\n=== Capturing second turn attestation via browser ===");
-    let turn2_payload = match browser_client2
-        .get_stream_generate_payload(
-            &cookies,
-            "What is my name?",
-            Some(&state.conversation_id),
-        )
-        .await
-    {
-        Ok(p) => {
-            std::fs::write(
-                format!("{out_dir}/browser_turn2_inner_req_list.json"),
-                serde_json::to_string_pretty(&p.inner_req_list).unwrap(),
+        // For the second turn we need fresh attestation tokens from the browser.
+        // Launch a new browser client with the conversation_id so it continues the
+        // same conversation and captures slots 3/4/5 for turn 2.
+        let browser_client2 = BrowserAttestationClient::new(
+            std::env::var("CHROME_PATH").unwrap_or_else(|_| "/usr/bin/chromium".into()),
+        );
+        println!("\n=== Capturing second turn attestation via browser ===");
+        let turn2_payload = match browser_client2
+            .get_stream_generate_payload(
+                &cookies,
+                "What is my name?",
+                Some(&state.conversation_id),
             )
-            .unwrap();
-            println!("Browser second-turn payload captured");
-            p
+            .await
+        {
+            Ok(p) => {
+                std::fs::write(
+                    format!("{out_dir}/browser_turn2_inner_req_list.json"),
+                    serde_json::to_string_pretty(&p.inner_req_list).unwrap(),
+                )
+                .unwrap();
+                println!("Browser second-turn payload captured");
+                p
+            }
+            Err(e) => {
+                println!("Browser second-turn capture failed: {e}");
+                browser_client2.close().await;
+                return;
+            }
+        };
+        browser_client2.close().await;
+
+        // Extract attestation slots from browser second-turn payload.
+        let slot3 = turn2_payload.inner_req_list.get(3).cloned().unwrap_or(Value::Null);
+        let slot4 = turn2_payload.inner_req_list.get(4).cloned().unwrap_or(Value::Null);
+        let slot5 = turn2_payload.inner_req_list.get(5).cloned().unwrap_or(Value::Null);
+        println!("Browser turn2 slot3={slot3:?} slot4={slot4:?} slot5={slot5:?}");
+
+        // Craft second-turn HTTP request with our state but browser attestation.
+        let reqid2 = {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+            ((ts % 900_000) + 100_000).to_string()
+        };
+        let mut params2 = vec![
+            ("hl", "en"),
+            ("_reqid", reqid2.as_str()),
+            ("rt", "c"),
+            ("pageId", "none"),
+        ];
+        if let Some(ref bl) = build_label {
+            params2.push(("bl", bl.as_str()));
         }
-        Err(e) => {
-            println!("Browser second-turn capture failed: {e}");
-            browser_client2.close().await;
-            return;
+        if let Some(ref sid) = session_id {
+            params2.push(("f.sid", sid.as_str()));
         }
-    };
-    browser_client2.close().await;
 
-    // Extract attestation slots from browser second-turn payload.
-    let slot3 = turn2_payload.inner_req_list.get(3).cloned().unwrap_or(Value::Null);
-    let slot4 = turn2_payload.inner_req_list.get(4).cloned().unwrap_or(Value::Null);
-    let slot5 = turn2_payload.inner_req_list.get(5).cloned().unwrap_or(Value::Null);
-    println!("Browser turn2 slot3={slot3:?} slot4={slot4:?} slot5={slot5:?}");
+        let inner2 = build_inner_req_list_no_browser(
+            "What is my name?",
+            category_enum,
+            Some(&state),
+            Some(slot3),
+            Some(slot4),
+            Some(slot5),
+        );
+        let body2 = build_stream_generate_body(&inner2, "");
+        std::fs::write(format!("{out_dir}/browser_turn2_request_body.txt"), &body2).unwrap();
+        std::fs::write(
+            format!("{out_dir}/browser_turn2_mixed_inner_req_list.json"),
+            serde_json::to_string_pretty(&inner2).unwrap(),
+        )
+        .unwrap();
 
-    // Craft second-turn HTTP request with our state but browser attestation.
-    let reqid2 = {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        ((ts % 900_000) + 100_000).to_string()
-    };
-    let mut params2 = vec![
-        ("hl", "en"),
-        ("_reqid", reqid2.as_str()),
-        ("rt", "c"),
-        ("pageId", "none"),
-    ];
-    if let Some(ref bl) = build_label {
-        params2.push(("bl", bl.as_str()));
-    }
-    if let Some(ref sid) = session_id {
-        params2.push(("f.sid", sid.as_str()));
-    }
+        let mut params2 = vec![
+            ("hl", "en"),
+            ("_reqid", reqid2.as_str()),
+            ("rt", "c"),
+            ("pageId", "none"),
+            ("bl", build_label.as_deref().unwrap_or("")),
+            ("f.sid", session_id.as_deref().unwrap_or("")),
+        ];
 
-    let inner2 = build_inner_req_list_no_browser(
-        "What is my name?",
-        category_enum,
-        Some(&state),
-        Some(slot3),
-        Some(slot4),
-        Some(slot5),
-    );
-    let body2 = build_stream_generate_body(&inner2);
-    std::fs::write(format!("{out_dir}/browser_turn2_request_body.txt"), &body2).unwrap();
-    std::fs::write(
-        format!("{out_dir}/browser_turn2_mixed_inner_req_list.json"),
-        serde_json::to_string_pretty(&inner2).unwrap(),
-    )
-    .unwrap();
-
-    println!("\n=== Sending second turn with browser attestation ===");
-    match send_turn(&client, &headers, &params2, &inner2).await {
-        Ok(body) => {
-            std::fs::write(format!("{out_dir}/browser_turn2_response_raw.txt"), &body).unwrap();
-            println!("Turn 2 HTTP OK; body length {}", body.len());
-            println!("Text snippet: {}", response_text_snippet(&body));
-        }
-        Err(e) => {
-            std::fs::write(format!("{out_dir}/browser_turn2_error.txt"), &e).unwrap();
-            println!("Turn 2 failed: {e}");
+        println!("\n=== Sending second turn with browser attestation ===");
+        match send_turn(&client, &headers, &params2, &inner2, "").await {
+            Ok(body) => {
+                std::fs::write(format!("{out_dir}/browser_turn2_response_raw.txt"), &body).unwrap();
+                println!("Turn 2 HTTP OK; body length {}", body.len());
+                println!("Text snippet: {}", response_text_snippet(&body));
+            }
+            Err(e) => {
+                std::fs::write(format!("{out_dir}/browser_turn2_error.txt"), &e).unwrap();
+                println!("Turn 2 failed: {e}");
+            }
         }
     }
 }

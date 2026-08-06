@@ -86,6 +86,28 @@ impl WebModelInfo {
         derive_category_enum_inner(id, title)
     }
 
+    /// Human-readable ID slug used in OpenAI-compatible model listings.
+    pub fn human_id(&self) -> String {
+        let name = self
+            .versioned_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&self.title);
+        let source = name.to_lowercase();
+        let parts: Vec<&str> = source.split_whitespace().collect();
+        if parts.is_empty() {
+            return "gemini-unknown".into();
+        }
+        let mut normalized = vec!["gemini".to_string()];
+        for p in parts {
+            if p == "gemini" {
+                continue;
+            }
+            normalized.push(p.to_string());
+        }
+        normalized.join("-")
+    }
+
     /// Construct a model info value from an explicit category string for test/fixture use.
     #[cfg(test)]
     pub(crate) fn from_parts(id: &str, title: &str, category: &str, category_enum: u64) -> Self {
@@ -99,21 +121,6 @@ impl WebModelInfo {
         }
     }
 
-    pub fn human_id(&self) -> String {
-        let source = self
-            .versioned_name
-            .as_deref()
-            .or(Some(self.title.as_str()))
-            .unwrap_or("unknown")
-            .to_lowercase();
-        let parts: Vec<&str> = source.split_whitespace().collect();
-        if parts.is_empty() {
-            return "gemini-unknown".into();
-        }
-        let mut normalized = vec!["gemini".to_string()];
-        normalized.extend(parts.iter().map(|s| s.to_string()));
-        normalized.join("-")
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +136,9 @@ pub struct WebSession {
     pub cookies: HashMap<String, String>,
     /// Path to the Chrome/Chromium executable used for browser attestation.
     pub browser_path: Option<String>,
+    /// Google upload feed ID used by the Gemini web frontend when pushing
+    /// attached files to `push.clients6.google.com/upload/`.
+    pub push_id: Option<String>,
 }
 
 impl Default for WebSession {
@@ -147,7 +157,22 @@ impl WebSession {
             conversation_state: None,
             cookies: HashMap::new(),
             browser_path,
+            push_id: std::env::var("GEMINI_PUSH_ID").ok().filter(|s| !s.is_empty()),
         }
+    }
+
+    /// Return the effective push-id: explicit env override wins, then any value
+    /// extracted from `/app`, then the historical default.
+    pub fn effective_push_id(&self) -> Option<&str> {
+        std::env::var("GEMINI_PUSH_ID")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                // leak the String to obtain a stable &str; this is called once
+                // per upload so the leak is tiny and bounded.
+                Box::leak(s.into_boxed_str()) as &str
+            })
+            .or(self.push_id.as_deref())
     }
 }
 
@@ -321,7 +346,14 @@ impl WebFrontendClient {
     }
 
     pub fn build_headers(&self) -> Vec<(String, String)> {
-        vec![
+        self.build_headers_with_reqid(None)
+    }
+
+    /// Build headers for a StreamGenerate request. When `reqid` is provided,
+    /// the `x-goog-ext-525005358-jspb` side-channel header is populated with the
+    /// same UUID to keep the request in sync with `inner_req_list[59]`.
+    pub fn build_headers_with_reqid(&self, reqid: Option<&str>) -> Vec<(String, String)> {
+        let mut headers = vec![
             (
                 "Content-Type".into(),
                 "application/x-www-form-urlencoded;charset=UTF-8".into(),
@@ -332,7 +364,21 @@ impl WebFrontendClient {
             ("X-Same-Domain".into(), "1".into()),
             ("Cache-Control".into(), "no-cache".into()),
             ("Pragma".into(), "no-cache".into()),
-        ]
+            // Chrome client-hint headers are required for Gemini's newer
+            // StreamGenerate/BardChatUi endpoints. Values match the current
+            // headless/regular Chrome 132 release.
+            ("sec-ch-ua".into(), "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"133\", \"Chromium\";v=\"133\"".into()),
+            ("sec-ch-ua-mobile".into(), "?0".into()),
+            ("sec-ch-ua-platform".into(), "\"Windows\"".into()),
+            ("sec-fetch-dest".into(), "empty".into()),
+            ("sec-fetch-mode".into(), "cors".into()),
+            ("sec-fetch-site".into(), "same-origin".into()),
+        ];
+        if let Some(id) = reqid {
+            let ext = serde_json::json!([id, 1]).to_string();
+            headers.push(("x-goog-ext-525005358-jspb".into(), ext));
+        }
+        headers
     }
 
     async fn init_session(&mut self) -> Result<()> {
@@ -392,6 +438,11 @@ impl WebFrontendClient {
             self.session.session_id = Some(sid);
         }
 
+        if let Some(push_id) = extract_push_id(&body) {
+            debug!(push_id = %push_id, "Extracted push_id from WIZ");
+            self.session.push_id = Some(push_id);
+        }
+
         Ok(())
     }
 
@@ -406,13 +457,8 @@ impl WebFrontendClient {
             self.init_session().await?;
         }
 
-        let reqid = {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            ((ts % 900_000) + 100_000).to_string()
-        };
+        let request_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
+        let reqid = request_uuid.clone();
 
         let language = self.session.language.clone();
         let build_label = self.session.build_label.clone();
@@ -445,16 +491,17 @@ impl WebFrontendClient {
 
         // Upload any inline data parts before building the StreamGenerate payload.
         let attachments = self.upload_inline_attachments(request).await?;
-        let (inner_req_list, used_browser) = build_inner_req_list(
+        let (mut inner_req_list, used_browser) = build_inner_req_list(
             request,
             category_enum,
             self.session.conversation_state.as_ref(),
             browser_payload_ref,
             &attachments,
         );
+        inner_req_list[59] = json!(request_uuid);
         let body = build_stream_generate_body(&inner_req_list, access_token.as_deref().unwrap_or(""));
 
-        let headers = self.build_headers();
+        let headers = self.build_headers_with_reqid(Some(&request_uuid));
 
         debug!(mode_id, category_enum, used_browser, attachments_count = attachments.len(), "Sending request to web frontend");
 
@@ -533,13 +580,8 @@ impl WebFrontendClient {
             self.init_session().await?;
         }
 
-        let reqid = {
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            ((ts % 900_000) + 100_000).to_string()
-        };
+        let request_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
+        let reqid = request_uuid.clone();
 
         let language = self.session.language.clone();
         let build_label = self.session.build_label.clone();
@@ -572,16 +614,17 @@ impl WebFrontendClient {
 
         // Upload any inline data parts before building the StreamGenerate payload.
         let attachments = self.upload_inline_attachments(request).await?;
-        let (inner_req_list, used_browser) = build_inner_req_list(
+        let (mut inner_req_list, used_browser) = build_inner_req_list(
             request,
             category_enum,
             self.session.conversation_state.as_ref(),
             browser_payload_ref,
             &attachments,
         );
+        inner_req_list[59] = json!(request_uuid);
         let body = build_stream_generate_body(&inner_req_list, access_token.as_deref().unwrap_or(""));
 
-        let headers = self.build_headers();
+        let headers = self.build_headers_with_reqid(Some(&request_uuid));
 
         debug!(mode_id, category_enum, used_browser, attachments_count = attachments.len(), "Sending streaming request to web frontend");
 
@@ -701,6 +744,10 @@ impl WebFrontendClient {
         bytes: Vec<u8>,
     ) -> Result<String> {
         let cookie_header = self.build_cookie_header();
+        let push_id = self
+            .session
+            .effective_push_id()
+            .unwrap_or("feeds/mcudyrk2a4khkz");
 
         // Step 1: initiate the resumable upload.
         let start_response = self
@@ -710,10 +757,17 @@ impl WebFrontendClient {
             .header("x-goog-upload-header-content-length", bytes.len().to_string())
             .header("x-goog-upload-protocol", "resumable")
             .header("x-tenant-id", "bard-storage")
+            .header("push-id", push_id)
             .header("Cookie", &cookie_header)
             .header("Origin", WEB_BASE_URL)
             .header("Referer", format!("{WEB_BASE_URL}/"))
             .header("User-Agent", USER_AGENT)
+            .header("sec-ch-ua", "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"133\", \"Chromium\";v=\"133\"")
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Windows\"")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "cross-site")
             .body(format!("File name: {filename}"))
             .send()
             .await
@@ -744,10 +798,17 @@ impl WebFrontendClient {
             .header("x-goog-upload-command", "upload, finalize")
             .header("x-goog-upload-offset", "0")
             .header("x-tenant-id", "bard-storage")
+            .header("push-id", push_id)
             .header("Cookie", &cookie_header)
             .header("Origin", WEB_BASE_URL)
             .header("Referer", format!("{WEB_BASE_URL}/"))
             .header("User-Agent", USER_AGENT)
+            .header("sec-ch-ua", "\"Not A(Brand\";v=\"99\", \"Google Chrome\";v=\"133\", \"Chromium\";v=\"133\"")
+            .header("sec-ch-ua-mobile", "?0")
+            .header("sec-ch-ua-platform", "\"Windows\"")
+            .header("sec-fetch-dest", "empty")
+            .header("sec-fetch-mode", "cors")
+            .header("sec-fetch-site", "cross-site")
             .header("Content-Type", mime_type)
             .body(bytes)
             .send()
@@ -1002,6 +1063,8 @@ fn category_from_enum(value: u64) -> String {
     .to_string()
 }
 
+
+
 fn derive_category_enum_inner(id: &str, title: &str) -> u64 {
     let combined = format!("{id} {title}").to_lowercase();
     if combined.contains("lite") {
@@ -1231,10 +1294,12 @@ fn build_stream_generate_body(inner_req_list: &[Value], at: &str) -> String {
     let inner_json = serde_json::to_string(inner_req_list).unwrap_or_default();
     let f_req = json!([null, inner_json]);
     let f_req_str = serde_json::to_string(&f_req).unwrap_or_default();
-    let form_data = [
+    let mut form_data = vec![
         format!("f.req={}", urlencoding::encode(&f_req_str)),
-        format!("at={}", urlencoding::encode(at)),
     ];
+    if !at.is_empty() {
+        form_data.push(format!("at={}", urlencoding::encode(at)));
+    }
     form_data.join("&")
 }
 
@@ -1526,6 +1591,26 @@ fn extract_session_id(body: &str) -> Option<String> {
     None
 }
 
+/// Extract the primary upload feed ID (`push-id`) from `/app` HTML.
+///
+/// The canonical key is `qKIAYe`; `KnDnFf` is a secondary feed used for some
+/// alternative upload paths. Either must start with `feeds/`.
+fn extract_push_id(body: &str) -> Option<String> {
+    for key in ["\"qKIAYe\":\"", "\"KnDnFf\":\""] {
+        if let Some(idx) = body.find(key) {
+            let start = idx + key.len();
+            if let Some(end) = body[start..].find('"') {
+                let feed = &body[start..start + end];
+                if feed.starts_with("feeds/") {
+                    return Some(feed.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
 /// Extract multi-turn conversation state from a raw StreamGenerate response.
 ///
 /// The response is a length-prefixed sequence of WIZ JSON arrays.  We look for
@@ -1670,7 +1755,7 @@ fn parse_stream_response(body: &str) -> Result<String> {
         return Ok(text);
     }
 
-    error!(body_len = body.len(), "Could not extract text from response");
+    error!(body_len = body.len(), body = %body, "Could not extract text from response");
     Err(ProxyError::GeminiApi(
         "Could not parse response from Gemini web frontend".into(),
     ))
