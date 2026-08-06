@@ -32,22 +32,21 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Config
 dotenvy = "0.15"
 
+# Gemini SDK
+gemini-sdk = { path = "../gemini-sdk", features = ["browser-attestation"] }
+
 # Misc
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.2"
 futures = "0.3"
 tokio-stream = "0.1"
-sha1 = "0.10"
-hex = "0.4"
 base64 = "0.22"
 url = "2"
 urlencoding = "2"
-tokio-tungstenite = { version = "0.26", optional = true }
 http = "1"
 
 [features]
 default = []
-browser-attestation = ["dep:tokio-tungstenite"]
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

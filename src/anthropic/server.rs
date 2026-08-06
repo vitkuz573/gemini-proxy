@@ -52,7 +52,7 @@ async fn messages(
     }
     let model = request.model.clone();
 
-    let gemini_request = anthropic_to_gemini_request(&request)?;
+    let gemini_request = crate::gemini::client::ChatRequest::from(&anthropic_to_gemini_request(&request)?);
 
     if request.stream.unwrap_or(false) {
         let response = state
@@ -69,6 +69,7 @@ async fn messages(
             .gemini_client
             .generate_content(&model, &gemini_request)
             .await?;
+        let gemini_response = crate::gemini::client::map_client_response_to_generate_content_response(gemini_response);
         let anthropic_response = gemini_to_anthropic_response(gemini_response, &model)?;
         Ok(Json(serde_json::to_value(anthropic_response)?).into_response())
     }
@@ -130,9 +131,9 @@ fn build_anthropic_sse_response(
                     if let Some(ref content) = candidate.content {
                         for part in &content.parts {
                             match part {
-                                ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
-                                ResponsePart::Thought(tp) => chunk_thinking.push_str(&tp.text),
-                                ResponsePart::FunctionCall(fc) => {
+                                crate::gemini::types::ResponsePart::Text(tp) => chunk_text.push_str(&tp.text),
+                                crate::gemini::types::ResponsePart::Thought(tp) => chunk_thinking.push_str(&tp.text),
+                                crate::gemini::types::ResponsePart::FunctionCall(fc) => {
                                     let args_str = serde_json::to_string(&fc.function_call.args)
                                         .unwrap_or_else(|_| "{}".into());
                                     let key = (fc.function_call.name.clone(), args_str.clone());
@@ -308,7 +309,7 @@ fn build_anthropic_sse_response(
                     serde_json::from_str::<Value>(data)
                         .ok()
                         .and_then(|parsed| {
-                            crate::gemini::web_frontend::extract_text_from_parsed_response(&parsed)
+                            gemini_sdk::extract_text_from_parsed_response(&parsed)
                                 .map(|text| GenerateContentResponse {
                                     candidates: vec![Candidate {
                                         content: Some(ResponseContent {
@@ -328,8 +329,12 @@ fn build_anthropic_sse_response(
         }
 
         if line.starts_with('[')
-            && let Ok(parts) = crate::gemini::web_frontend::parse_response_parts(line)
+            && let Ok(parts) = gemini_sdk::parse_response_parts(line)
         {
+            let parts: Vec<crate::gemini::types::ResponsePart> = parts
+                .into_iter()
+                .filter_map(map_sdk_content_part)
+                .collect();
             return Some(GenerateContentResponse {
                 candidates: vec![Candidate {
                     content: Some(ResponseContent {
@@ -347,6 +352,13 @@ fn build_anthropic_sse_response(
         }
 
         None
+    }
+
+    fn map_sdk_content_part(part: gemini_sdk::ContentPart) -> Option<crate::gemini::types::ResponsePart> {
+        match part {
+            gemini_sdk::ContentPart::Text(text) => Some(crate::gemini::types::ResponsePart::Text(crate::gemini::types::TextResponsePart { text })),
+            gemini_sdk::ContentPart::Image(_) => None,
+        }
     }
 
     let body_stream = ReceiverStream::new(rx).map(|result| match result {

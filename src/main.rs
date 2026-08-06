@@ -63,14 +63,9 @@ async fn main() -> anyhow::Result<()> {
     config.validate()?;
 
     tracing::info!("Starting gemini_proxy proxy on {}", config.listen_addr);
-    tracing::info!("Auth mode: {}", if config.has_api_key() { "API Key" } else { "Cookie" });
+    tracing::info!("Auth mode: Cookie");
 
-    let auth = gemini_proxy::gemini::auth::GeminiAuth::from_config(&config)?;
-    let gemini_client = gemini_proxy::gemini::client::GeminiClient::new_with_browser_path(
-        auth,
-        config.gemini_base_url.clone(),
-        config.browser_path().map(|s| s.to_string()),
-    )?;
+    let gemini_client = gemini_proxy::gemini::client::GeminiClient::from_config(&config)?;
     let openai_app = gemini_proxy::openai::server::create_router(gemini_proxy::openai::server::AppState {
         gemini_client: gemini_client.clone(),
         config: config.clone(),
